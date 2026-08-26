@@ -10,3 +10,7 @@ figures/*.png
 # Python caches
 __pycache__/
 *.pyc
+
+# compressed archives
+*.tar.gz
+*.zip
