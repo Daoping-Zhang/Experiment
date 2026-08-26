@@ -13,7 +13,8 @@
 BIN := bin
 CXX := g++
 CXXFLAGS := -O3 -std=c++17 -pthread -Wall
-NVCC := $(shell command -v nvcc 2>/dev/null || true)
+# Detect nvcc: PATH first, then the standard CUDA install location.
+NVCC := $(shell command -v nvcc 2>/dev/null || { [ -x /usr/local/cuda/bin/nvcc ] && echo /usr/local/cuda/bin/nvcc; })
 NVCCFLAGS := -O3 -std=c++17
 CUDA_ARCH ?= -arch=native
 BLAS_FLAGS := $(shell bash scripts/detect_blas.sh)
