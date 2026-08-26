@@ -1,0 +1,12 @@
+# Build artifacts
+/bin/
+
+# Generated experiment outputs (reproducible by running the scripts)
+results/**/*.csv
+results/system_info.txt
+results/summary.md
+figures/*.png
+
+# Python caches
+__pycache__/
+*.pyc
