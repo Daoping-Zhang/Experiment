@@ -88,6 +88,7 @@ template <typename T>
 inline void sink(const T& v) {
     static volatile T s;
     s = v;
+    (void)s;  // volatile read: observable side effect, also silences -Wunused-but-set-variable
 }
 
 // ---------------------------------------------------------------------------
