@@ -80,6 +80,16 @@ int main(int argc, char** argv) {
     dim3 grid, block;
     launch_scaled(grid, block, G);
 
+    // --show-launch: how logical threads map to blocks / warps (no benchmark).
+    if (has_arg(argc, argv, "--show-launch")) {
+        std::printf("Requested logical threads : %ld\n", G);
+        std::printf("Block size                : %u\n", block.x);
+        std::printf("Grid size                 : %u\n", grid.x);
+        std::printf("Logical warps             : %ld\n", G / 32);
+        std::printf("Launch                    : <<<%u, %u>>>\n", grid.x, block.x);
+        return 0;
+    }
+
     auto pre = [&] { CUDA_CHECK(cudaMemcpy(d_in, in.data(), sizeof(float) * N, cudaMemcpyHostToDevice)); };
     auto launch = [&] { elem_kernel<<<grid, block>>>(d_in, d_out, N, K, a, b, G); };
 
@@ -116,9 +126,25 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[gpu] threads=%ld: kernel=%.4f ms  %.3e elem/s  %.3f GFLOPS\n", G, k_ms,
                 throughput, gflops);
 
-    emit(csv_file,
-         {"GPU", std::to_string(G), std::to_string(N), std::to_string(K), fmt(k_ms),
-          fmt(throughput, 3), fmt(gflops, 3)});
+    if (human_format(argc, argv)) {
+        HumanReport r;
+        r.title = "Experiment 3 (GPU): " + std::to_string(G) + " threads";
+        r.add("Platform", "GPU");
+        r.add("Logical threads", std::to_string(G));
+        r.add("Block size", std::to_string(block.x));
+        r.add("Grid size", std::to_string(grid.x));
+        r.add("Logical warps", std::to_string(G / 32));
+        r.add("Elements", std::to_string(N));
+        r.add("Compute iterations/elem", std::to_string(K));
+        r.add("Kernel latency", fmt(k_ms) + " ms");
+        r.add("Throughput", fmt(throughput, 3) + " elem/s");
+        r.add("GFLOPS", fmt(gflops, 3));
+        r.print();
+    } else {
+        emit(csv_file,
+             {"GPU", std::to_string(G), std::to_string(N), std::to_string(K), fmt(k_ms),
+              fmt(throughput, 3), fmt(gflops, 3)});
+    }
 
     CUDA_CHECK(cudaFree(d_in));
     CUDA_CHECK(cudaFree(d_out));

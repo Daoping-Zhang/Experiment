@@ -123,7 +123,17 @@ int main(int argc, char** argv) {
         const double gflops = 2.0 * std::pow(static_cast<double>(n), 3) / (k_ms * 1e-3) / 1e9;
         std::fprintf(stderr, "[gemm] n=%d: kernel=%.4f ms  %.3f GFLOPS\n", n, k_ms, gflops);
 
-        emit(csv_file, {"GPU", std::to_string(n), fmt(k_ms), fmt(gflops, 3)});
+        if (human_format(argc, argv)) {
+            HumanReport r;
+            r.title = "GEMM (GPU cuBLAS): n=" + std::to_string(n);
+            r.add("Platform", "GPU");
+            r.add("Matrix size", std::to_string(n) + " x " + std::to_string(n));
+            r.add("Kernel latency", fmt(k_ms) + " ms");
+            r.add("GFLOPS", fmt(gflops, 3));
+            r.print();
+        } else {
+            emit(csv_file, {"GPU", std::to_string(n), fmt(k_ms), fmt(gflops, 3)});
+        }
 
         CUDA_CHECK(cudaFree(d_A));
         CUDA_CHECK(cudaFree(d_B));

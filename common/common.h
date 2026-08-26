@@ -190,6 +190,37 @@ inline std::string fmt(long v) {
 }
 
 // ---------------------------------------------------------------------------
+// Human-readable report (used with `--format human` for live classroom demos).
+// `--format csv` (default) keeps the single-line CSV contract used by the
+// run scripts and perf wrapper.
+// ---------------------------------------------------------------------------
+class HumanReport {
+public:
+    std::string title;
+    std::vector<std::pair<std::string, std::string>> fields;
+
+    void add(const std::string& k, const std::string& v) { fields.emplace_back(k, v); }
+
+    void print(FILE* out = stdout) const {
+        size_t w = 0;
+        for (const auto& kv : fields) w = std::max(w, kv.first.size());
+        std::fprintf(out, "\n=== %s ===\n\n", title.c_str());
+        for (const auto& kv : fields)
+            std::fprintf(out, "  %-*s : %s\n", static_cast<int>(w), kv.first.c_str(),
+                         kv.second.c_str());
+        std::fprintf(out, "\n");
+    }
+};
+
+inline std::string get_format(int argc, char** argv) {
+    return get_arg(argc, argv, "--format", "csv");
+}
+
+inline bool human_format(int argc, char** argv) {
+    return get_format(argc, argv) == "human";
+}
+
+// ---------------------------------------------------------------------------
 // Deterministic RNG
 // ---------------------------------------------------------------------------
 inline std::mt19937 make_rng(uint32_t seed) {

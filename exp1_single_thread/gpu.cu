@@ -218,10 +218,25 @@ void run_chain_case(int argc, char** argv) {
     std::fprintf(stderr, "[gpu] %s %s: kernel=%.6f ms  e2e=%.6f ms  %.3f GFLOPS(kernel)\n",
                 workload.c_str(), variant.c_str(), k_ms, e2e_ms, gflops);
 
-    emit(csv_file,
-         {"GPU", workload, variant, "1", std::to_string(eff_iterations), fmt(k_ms),
-          fmt(throughput, 3), fmt(gflops, 3),
-          "NA", "NA", "NA", "NA", "NA", "NA", fmt(k_ms), fmt(e2e_ms)});
+    if (human_format(argc, argv)) {
+        HumanReport r;
+        r.title = (workload == "dependent")
+                      ? "Experiment 1A: Dependent Chain"
+                      : "Experiment 1B: Independent Chains (" + variant + ")";
+        r.add("Platform", "GPU");
+        r.add("CUDA threads", "1  (kernel<<<1,1>>>)");
+        r.add("Iterations", std::to_string(eff_iterations));
+        r.add("Kernel latency", fmt(k_ms) + " ms");
+        r.add("End-to-end latency", fmt(e2e_ms) + " ms");
+        r.add("Throughput", fmt(throughput, 3) + " iter/s");
+        r.add("GFLOPS (kernel)", fmt(gflops, 3));
+        r.print();
+    } else {
+        emit(csv_file,
+             {"GPU", workload, variant, "1", std::to_string(eff_iterations), fmt(k_ms),
+              fmt(throughput, 3), fmt(gflops, 3),
+              "NA", "NA", "NA", "NA", "NA", "NA", fmt(k_ms), fmt(e2e_ms)});
+    }
 
     CUDA_CHECK(cudaFree(d_out));
 }
@@ -269,10 +284,23 @@ void run_branch_case(int argc, char** argv) {
     std::fprintf(stderr, "[gpu] branch(%s): kernel=%.6f ms  e2e=%.6f ms  %.3f GFLOPS(kernel)\n",
                 data_mode.c_str(), k_ms, e2e_ms, gflops);
 
-    emit(csv_file,
-         {"GPU", "branch", data_mode, "1", std::to_string(N), fmt(k_ms), fmt(throughput, 3),
-          fmt(gflops, 3),
-          "NA", "NA", "NA", "NA", "NA", "NA", fmt(k_ms), fmt(e2e_ms)});
+    if (human_format(argc, argv)) {
+        HumanReport r;
+        r.title = "Experiment 1C: Branch Prediction (" + data_mode + ")";
+        r.add("Platform", "GPU");
+        r.add("CUDA threads", "1  (kernel<<<1,1>>>)");
+        r.add("Elements", std::to_string(N));
+        r.add("Kernel latency", fmt(k_ms) + " ms");
+        r.add("End-to-end latency", fmt(e2e_ms) + " ms");
+        r.add("Throughput", fmt(throughput, 3) + " elem/s");
+        r.add("GFLOPS (kernel)", fmt(gflops, 3));
+        r.print();
+    } else {
+        emit(csv_file,
+             {"GPU", "branch", data_mode, "1", std::to_string(N), fmt(k_ms), fmt(throughput, 3),
+              fmt(gflops, 3),
+              "NA", "NA", "NA", "NA", "NA", "NA", fmt(k_ms), fmt(e2e_ms)});
+    }
 
     CUDA_CHECK(cudaFree(d_data));
     CUDA_CHECK(cudaFree(d_out));

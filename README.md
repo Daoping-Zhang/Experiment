@@ -124,6 +124,51 @@ python3 scripts/make_summary.py
 
 ---
 
+## 3.5 课堂逐步演示（demo-friendly）
+
+每个 binary 独立可运行、每个 case 独立可观察、每个 profiler 独立可调用，方便老师「看代码 → 问预测 → 手动跑一个 case → 看数据 → 换 case → 对比 → 开 profiler → 下结论」。
+
+**人类可读输出**（所有 binary 支持 `--format human`，默认 `csv` 供脚本采集）：
+```bash
+./bin/exp1_cpu --case dependent --iterations 100000000 --format human
+./bin/exp3_gpu --threads 262144 --size 1000000 --compute-iterations 500 --format human
+```
+
+**看任务映射 / 启动配置（不跑 benchmark）**：
+```bash
+./bin/exp2_cpu_control --distribution grouped --threads 8 --tasks 32 --dry-run
+./bin/exp2_cpu_control --distribution mixed   --threads 8 --tasks 32 --dry-run
+./bin/exp2_gpu_control --distribution grouped --threads 64 --tasks 64 --dry-run   # 按 Warp 显示
+./bin/exp3_gpu       --threads 262144 --show-launch                               # threads/block/grid/warp
+```
+
+**逐线程耗时**（CPU 负载不均）：
+```bash
+./bin/exp2_cpu_control --distribution grouped --threads 8 --tasks 1048576 --thread-times
+```
+
+**并排对比 / profiler 单点调用**：
+```bash
+python3 scripts/compare_exp1.py dependent    # 或 independent / branch
+bash scripts/perf_exp1_cpu.sh independent 8  # IPC
+bash scripts/perf_exp1_cpu.sh branch random  # branch-miss
+bash scripts/profile_exp2_cpu_memory.sh cyclic 8
+bash scripts/profile_exp2_gpu_memory.sh 32       # 抽取 memory transaction/sector
+bash scripts/profile_exp2_gpu_control.sh mixed   # 抽取 divergence/lane
+bash scripts/profile_exp3_gpu.sh 262144          # 抽取 occupancy/SM utilization
+```
+
+**单张图独立生成**：
+```bash
+python3 scripts/plot_exp2_gpu_stride.py
+python3 scripts/plot_exp3_scaling.py
+python3 scripts/plot_gemm.py
+```
+
+这些是**独立工具**，不会被 `run_all.sh` 一键滚屏替代——老师可以随时停下、换参数、重跑。
+
+---
+
 ## 4. 统一实验原则（已在代码中落实）
 
 1. **CPU/GPU 数学工作一致**：两边执行相同数量的 FLOP（`FLOPs = 2N`），仅平台不同。

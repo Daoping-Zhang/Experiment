@@ -71,6 +71,25 @@ int main(int argc, char** argv) {
         is_heavy[static_cast<size_t>(i)] = (dist == "grouped") ? (i < N / 2 ? 1 : 0)
                                                                : ((i % 2 == 0) ? 1 : 0);
 
+    // --dry-run: show the warp -> H/L placement (use a small --threads, e.g. 64).
+    if (has_arg(argc, argv, "--dry-run")) {
+        const long num_warps = threads / 32;
+        const long show = std::min<long>(num_warps, 32L);
+        std::printf("Distribution: %s   (threads=%ld, tasks=%ld, warps=%ld, H=heavy L=light)\n\n",
+                    dist.c_str(), threads, N, num_warps);
+        for (long w = 0; w < show; ++w) {
+            std::printf("Warp %ld: ", w);
+            for (int lane = 0; lane < 32; ++lane) {
+                const long i = w * 32 + lane;
+                if (i >= N) break;
+                std::printf("%c ", is_heavy[static_cast<size_t>(i)] ? 'H' : 'L');
+            }
+            std::printf("\n");
+        }
+        if (num_warps > show) std::printf("... (%ld more warps)\n", num_warps - show);
+        return 0;
+    }
+
     // Host reference.
     double reference = 0.0;
     for (long i = 0; i < N; ++i) {
@@ -117,9 +136,22 @@ int main(int argc, char** argv) {
     const double throughput = static_cast<double>(N) / (k_ms * 1e-3);
     std::fprintf(stderr, "[gpu] %s: kernel=%.3f ms  %.3e tasks/s\n", dist.c_str(), k_ms, throughput);
 
-    emit(csv_file,
-         {"GPU", dist, std::to_string(threads), std::to_string(N), std::to_string(HEAVY),
-          std::to_string(LIGHT), fmt(k_ms), fmt(throughput, 3)});
+    if (human_format(argc, argv)) {
+        HumanReport r;
+        r.title = "Experiment 2B (GPU): " + dist + " distribution";
+        r.add("Platform", "GPU");
+        r.add("Distribution", dist);
+        r.add("Logical threads", std::to_string(threads));
+        r.add("Tasks", std::to_string(N));
+        r.add("Heavy / Light", std::to_string(HEAVY) + " / " + std::to_string(LIGHT) + " iters");
+        r.add("Kernel latency", fmt(k_ms) + " ms");
+        r.add("Throughput", fmt(throughput, 3) + " tasks/s");
+        r.print();
+    } else {
+        emit(csv_file,
+             {"GPU", dist, std::to_string(threads), std::to_string(N), std::to_string(HEAVY),
+              std::to_string(LIGHT), fmt(k_ms), fmt(throughput, 3)});
+    }
 
     CUDA_CHECK(cudaFree(d_vals));
     CUDA_CHECK(cudaFree(d_out));

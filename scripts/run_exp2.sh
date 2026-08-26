@@ -43,7 +43,7 @@ done
 
 echo "== Experiment 2A: GPU memory mapping =="
 if [ -x "$BIN_GPU_MEM" ]; then
-  for s in 1 2 4 8 16 32; do
+  for s in 1 2 4 8 16 32 64 128 256; do
     "$BIN_GPU_MEM" --stride "$s" --threads "$GPU_THREADS" --size "$GPU_SIZE" \
       --csv-file "$RES/gpu_memory_mapping.csv" >/dev/null
   done

@@ -107,9 +107,22 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[cpu] %s: threads=%d median=%.3f ms  %.3e elem/s  %.3f GB/s\n", mapping.c_str(),
                 T, t * 1e3, elements_per_s, bw_gbs);
 
-    emit(csv_file,
-         {"CPU", mapping, std::to_string(T), std::to_string(N), fmt(t * 1e3), fmt(elements_per_s, 3),
-          fmt(bw_gbs, 3),
-          "NA", "NA", "NA", "NA", "NA", "NA"});
+    if (human_format(argc, argv)) {
+        HumanReport r;
+        r.title = "Experiment 2A (CPU): " + mapping + " partitioning";
+        r.add("Platform", "CPU");
+        r.add("Mapping", mapping);
+        r.add("Threads", std::to_string(T));
+        r.add("Elements", std::to_string(N));
+        r.add("Latency", fmt(t * 1e3) + " ms");
+        r.add("Elements/s", fmt(elements_per_s, 3));
+        r.add("Effective bandwidth", fmt(bw_gbs, 3) + " GB/s");
+        r.print();
+    } else {
+        emit(csv_file,
+             {"CPU", mapping, std::to_string(T), std::to_string(N), fmt(t * 1e3), fmt(elements_per_s, 3),
+              fmt(bw_gbs, 3),
+              "NA", "NA", "NA", "NA", "NA", "NA"});
+    }
     return 0;
 }

@@ -88,8 +88,21 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[cpu] threads=%d: median=%.4f ms  %.3e elem/s  %.3f GFLOPS\n", T, t * 1e3,
                 throughput, gflops);
 
-    emit(csv_file,
-         {"CPU", std::to_string(T), std::to_string(N), std::to_string(K), fmt(t * 1e3),
-          fmt(throughput, 3), fmt(gflops, 3)});
+    if (human_format(argc, argv)) {
+        HumanReport r;
+        r.title = "Experiment 3 (CPU): " + std::to_string(T) + " threads";
+        r.add("Platform", "CPU");
+        r.add("Threads", std::to_string(T));
+        r.add("Elements", std::to_string(N));
+        r.add("Compute iterations/elem", std::to_string(K));
+        r.add("Latency", fmt(t * 1e3) + " ms");
+        r.add("Throughput", fmt(throughput, 3) + " elem/s");
+        r.add("GFLOPS", fmt(gflops, 3));
+        r.print();
+    } else {
+        emit(csv_file,
+             {"CPU", std::to_string(T), std::to_string(N), std::to_string(K), fmt(t * 1e3),
+              fmt(throughput, 3), fmt(gflops, 3)});
+    }
     return 0;
 }

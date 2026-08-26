@@ -60,6 +60,21 @@ int main(int argc, char** argv) {
         work[static_cast<size_t>(i)] = heavy ? HEAVY : LIGHT;
     }
 
+    // --dry-run: show the thread -> H/L placement, then exit (no benchmark).
+    if (has_arg(argc, argv, "--dry-run")) {
+        std::printf("Distribution: %s   (threads=%d, tasks=%ld, H=heavy L=light)\n\n",
+                    dist.c_str(), T, N);
+        for (int t = 0; t < T; ++t) {
+            const long begin = t * N / T;
+            const long end = (t + 1) * N / T;
+            std::printf("Thread %d: ", t);
+            for (long i = begin; i < end; ++i)
+                std::printf("%c ", work[static_cast<size_t>(i)] == HEAVY ? 'H' : 'L');
+            std::printf("\n");
+        }
+        return 0;
+    }
+
     // Single-thread double-precision reference for correctness.
     double reference = 0.0;
     for (long i = 0; i < N; ++i) {
@@ -115,9 +130,36 @@ int main(int argc, char** argv) {
                 "imbalance=%.3f\n",
                 dist.c_str(), latency_ms, throughput, mx, avg, mn, ratio);
 
-    emit(csv_file,
-         {"CPU", dist, std::to_string(T), std::to_string(N), std::to_string(HEAVY),
-          std::to_string(LIGHT), fmt(latency_ms), fmt(throughput, 3), fmt(mx), fmt(mn), fmt(avg),
-          fmt(ratio)});
+    if (has_arg(argc, argv, "--thread-times")) {
+        std::fprintf(stderr, "per-thread times (ms):\n");
+        for (int t = 0; t < T; ++t)
+            std::fprintf(stderr, "  Thread %d  %.2f\n", t, thread_times[static_cast<size_t>(t)]);
+    }
+
+    if (human_format(argc, argv)) {
+        HumanReport r;
+        r.title = "Experiment 2B (CPU): " + dist + " distribution";
+        r.add("Platform", "CPU");
+        r.add("Distribution", dist);
+        r.add("Threads", std::to_string(T));
+        r.add("Tasks", std::to_string(N));
+        r.add("Heavy / Light", std::to_string(HEAVY) + " / " + std::to_string(LIGHT) + " iters");
+        r.add("Overall latency", fmt(latency_ms) + " ms");
+        r.add("Throughput", fmt(throughput, 3) + " tasks/s");
+        r.add("Slowest thread", fmt(mx) + " ms");
+        r.add("Fastest thread", fmt(mn) + " ms");
+        r.add("Average thread", fmt(avg) + " ms");
+        r.add("Load imbalance (max/avg)", fmt(ratio));
+        r.print();
+        std::printf("  per-thread times:\n");
+        for (int t = 0; t < T; ++t)
+            std::printf("    Thread %d  %.2f ms\n", t, thread_times[static_cast<size_t>(t)]);
+        std::printf("\n");
+    } else {
+        emit(csv_file,
+             {"CPU", dist, std::to_string(T), std::to_string(N), std::to_string(HEAVY),
+              std::to_string(LIGHT), fmt(latency_ms), fmt(throughput, 3), fmt(mx), fmt(mn), fmt(avg),
+              fmt(ratio)});
+    }
     return 0;
 }

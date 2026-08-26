@@ -139,9 +139,22 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[gpu] stride=%s: threads=%ld kernel=%.3f ms  %.3e elem/s  %.3f GB/s\n",
                 variant.c_str(), threads, k_ms, elements_per_s, bw_gbs);
 
-    emit(csv_file,
-         {"GPU", variant, std::to_string(threads), std::to_string(N), fmt(k_ms), fmt(elements_per_s, 3),
-          fmt(bw_gbs, 3)});
+    if (human_format(argc, argv)) {
+        HumanReport r;
+        r.title = "Experiment 2A (GPU): stride " + variant + " access";
+        r.add("Platform", "GPU");
+        r.add("Stride", variant);
+        r.add("Logical threads", std::to_string(threads));
+        r.add("Elements", std::to_string(N));
+        r.add("Kernel latency", fmt(k_ms) + " ms");
+        r.add("Elements/s", fmt(elements_per_s, 3));
+        r.add("Effective bandwidth", fmt(bw_gbs, 3) + " GB/s");
+        r.print();
+    } else {
+        emit(csv_file,
+             {"GPU", variant, std::to_string(threads), std::to_string(N), fmt(k_ms), fmt(elements_per_s, 3),
+              fmt(bw_gbs, 3)});
+    }
 
     CUDA_CHECK(cudaFree(d_A));
     CUDA_CHECK(cudaFree(d_B));

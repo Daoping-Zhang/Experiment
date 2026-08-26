@@ -134,7 +134,17 @@ int main(int argc, char** argv) {
         const double gflops = 2.0 * std::pow(static_cast<double>(n), 3) / t / 1e9;
         std::fprintf(stderr, "[gemm] n=%d: median=%.4f ms  %.3f GFLOPS\n", n, t * 1e3, gflops);
 
-        emit(csv_file, {"CPU", std::to_string(n), fmt(t * 1e3), fmt(gflops, 3)});
+        if (human_format(argc, argv)) {
+            HumanReport r;
+            r.title = "GEMM (CPU): n=" + std::to_string(n);
+            r.add("Platform", "CPU");
+            r.add("Matrix size", std::to_string(n) + " x " + std::to_string(n));
+            r.add("Latency", fmt(t * 1e3) + " ms");
+            r.add("GFLOPS", fmt(gflops, 3));
+            r.print();
+        } else {
+            emit(csv_file, {"CPU", std::to_string(n), fmt(t * 1e3), fmt(gflops, 3)});
+        }
     }
     return 0;
 }

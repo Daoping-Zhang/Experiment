@@ -170,11 +170,25 @@ void run_chain_case(int argc, char** argv) {
     std::fprintf(stderr, "[cpu] %s %s: median=%.6f ms  throughput=%.3e iter/s  %.3f GFLOPS\n",
                 workload.c_str(), variant.c_str(), t * 1e3, throughput, gflops);
 
-    emit(csv_file,
-         {"CPU", workload, variant, "1", std::to_string(eff_iterations), fmt(t * 1e3),
-          fmt(throughput, 3), fmt(gflops, 3),
-          "NA", "NA", "NA", "NA", "NA", "NA",
-          "NA", fmt(t * 1e3)});
+    if (human_format(argc, argv)) {
+        HumanReport r;
+        r.title = (workload == "dependent")
+                      ? "Experiment 1A: Dependent Chain"
+                      : "Experiment 1B: Independent Chains (" + variant + ")";
+        r.add("Platform", "CPU");
+        r.add("Threads", "1");
+        r.add("Iterations", std::to_string(eff_iterations));
+        r.add("Latency", fmt(t * 1e3) + " ms");
+        r.add("Throughput", fmt(throughput, 3) + " iter/s");
+        r.add("GFLOPS", fmt(gflops, 3));
+        r.print();
+    } else {
+        emit(csv_file,
+             {"CPU", workload, variant, "1", std::to_string(eff_iterations), fmt(t * 1e3),
+              fmt(throughput, 3), fmt(gflops, 3),
+              "NA", "NA", "NA", "NA", "NA", "NA",
+              "NA", fmt(t * 1e3)});
+    }
 }
 
 void run_branch_case(int argc, char** argv) {
@@ -213,11 +227,23 @@ void run_branch_case(int argc, char** argv) {
     std::fprintf(stderr, "[cpu] branch(%s): median=%.6f ms  throughput=%.3e elem/s  %.3f GFLOPS\n",
                 data_mode.c_str(), t * 1e3, throughput, gflops);
 
-    emit(csv_file,
-         {"CPU", "branch", data_mode, "1", std::to_string(N), fmt(t * 1e3),
-          fmt(throughput, 3), fmt(gflops, 3),
-          "NA", "NA", "NA", "NA", "NA", "NA",
-          "NA", fmt(t * 1e3)});
+    if (human_format(argc, argv)) {
+        HumanReport r;
+        r.title = "Experiment 1C: Branch Prediction (" + data_mode + ")";
+        r.add("Platform", "CPU");
+        r.add("Threads", "1");
+        r.add("Elements", std::to_string(N));
+        r.add("Latency", fmt(t * 1e3) + " ms");
+        r.add("Throughput", fmt(throughput, 3) + " elem/s");
+        r.add("GFLOPS", fmt(gflops, 3));
+        r.print();
+    } else {
+        emit(csv_file,
+             {"CPU", "branch", data_mode, "1", std::to_string(N), fmt(t * 1e3),
+              fmt(throughput, 3), fmt(gflops, 3),
+              "NA", "NA", "NA", "NA", "NA", "NA",
+              "NA", fmt(t * 1e3)});
+    }
 }
 
 }  // namespace
