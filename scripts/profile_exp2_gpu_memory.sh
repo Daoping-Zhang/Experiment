@@ -9,6 +9,6 @@ BIN="$ROOT_DIR/bin/exp2_gpu_memory"
 stride="${1:-1}"
 
 exec python3 "$SCRIPT_DIR/ncu_profile.py" \
-  --patterns "sector,transaction,dram,throughput,l1tex,gpu__time_duration" \
-  --label "GPU memory profile (stride $stride)" \
+  --preset memory \
+  --label "GPU memory evidence (stride $stride)" \
   -- "$BIN" --stride "$stride" --threads 65536 --size 16777216 --iters 1

@@ -58,7 +58,7 @@ __device__ __forceinline__ float branch_taken_gpu(float v) {
 
 __device__ __forceinline__ float branch_not_taken_gpu(float v) {
     float r = v;
-    for (int k = 0; k < BRANCH_INNER; ++k) r = r * 0.99f + 0.01f;
+    for (int k = 0; k < BRANCH_INNER; ++k) r = r * 0.98f + 0.02f;
     return r;
 }
 
@@ -95,7 +95,9 @@ double branch_ref(const std::vector<float>& data) {
     double x = 0.0;
     for (float v : data) {
         double r = v;
-        for (int k = 0; k < BRANCH_INNER; ++k) r = r * 0.99 + 0.01;
+        const double a = (v > 0.0f) ? 0.99 : 0.98;
+        const double b = (v > 0.0f) ? 0.01 : 0.02;
+        for (int k = 0; k < BRANCH_INNER; ++k) r = r * a + b;
         x += r;
     }
     return x;

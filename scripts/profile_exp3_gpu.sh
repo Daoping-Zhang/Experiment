@@ -9,6 +9,6 @@ BIN="$ROOT_DIR/bin/exp3_gpu"
 threads="${1:-65536}"
 
 exec python3 "$SCRIPT_DIR/ncu_profile.py" \
-  --patterns "occupancy,warps_active,throughput,sm__,inst_executed,gpu__time_duration" \
-  --label "GPU scaling profile (threads $threads)" \
+  --preset occupancy \
+  --label "GPU scaling evidence (threads $threads)" \
   -- "$BIN" --threads "$threads" --size 1000000 --compute-iterations 500 --iters 1

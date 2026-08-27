@@ -3,14 +3,17 @@
 //
 // C[i] = A[i] + B[i] with a FIXED logical thread count. Only the access order
 // changes:
-//   stride 1      : coalesced grid-stride loop (good — warp reads 32 floats
-//                   contiguously)
-//   stride s >= 2 : every element still processed exactly once, but through a
-//                   permutation so consecutive threads touch addresses `s`
-//                   apart (bad — many memory transactions per warp)
+//   stride 1      : coalesced grid-stride loop (warp reads 32 floats
+//                   contiguously -> few memory transactions)
+//   stride s >= 2 : every element still processed exactly once, but consecutive
+//                   threads touch addresses `s` apart -> uncoalesced
 //
-// The permutation is a true bijection (built by make_stride_permutation), so
-// total FLOPs and total bytes are identical to the coalesced case.
+// The stride-s access order is an ARITHMETIC permutation computed on the fly:
+//     idx = (p % M) * s + (p / M),  where M = N / s
+// For consecutive logical positions p this steps by s, and it is a bijection
+// over [0, N). It uses mask/shift (N and s are powers of two), so there is NO
+// permutation table in global memory: every stride reads exactly A + B and
+// writes C — total FLOPs and total bytes are identical across strides.
 //
 // Usage:
 //   ./exp2_gpu_memory --stride 1  --threads 65536 --size 16777216
@@ -34,12 +37,15 @@ __global__ void vec_add_coalesced(const float* A, const float* B, float* C, long
     for (; i < N; i += stride) C[i] = A[i] + B[i];
 }
 
-__global__ void vec_add_permuted(const float* A, const float* B, float* C, const int* perm,
-                                 long N) {
+// Arithmetic strided permutation (no global-memory table).
+//   mask = M - 1, logM = log2(M), M = N / stride (powers of two)
+//   idx  = (p & mask) * stride + (p >> logM) == (p % M) * stride + (p / M)
+__global__ void vec_add_permuted(const float* A, const float* B, float* C, long N,
+                                 long stride, long mask, int logM) {
     long p = static_cast<long>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const long stride = static_cast<long>(gridDim.x) * blockDim.x;
-    for (; p < N; p += stride) {
-        const int idx = perm[p];
+    const long G = static_cast<long>(gridDim.x) * blockDim.x;
+    for (; p < N; p += G) {
+        const long idx = (p & mask) * stride + (p >> logM);
         C[idx] = A[idx] + B[idx];
     }
 }
@@ -68,37 +74,30 @@ int main(int argc, char** argv) {
     threads = grid * block;  // actual launched logical threads
     const std::string variant = (stride == 1) ? "1" : std::to_string(stride);
 
+    // Arithmetic permutation requires N divisible by stride and M = N/stride a
+    // power of two (mask/shift). Defaults satisfy this; reject otherwise.
+    if (N % stride != 0) {
+        std::fprintf(stderr, "size must be divisible by stride (N=%ld, stride=%ld)\n", N, stride);
+        std::exit(1);
+    }
+    const long M = N / stride;
+    if (M < 2 || (M & (M - 1)) != 0) {
+        std::fprintf(stderr, "M=N/stride must be a power of two (N=%ld, stride=%ld)\n", N, stride);
+        std::exit(1);
+    }
+    int logM = 0;
+    for (long m = M; m > 1; m >>= 1) ++logM;
+    const long mask = M - 1;
+
     std::vector<float> A = gen_lcg_floats(N, 12345u);
     std::vector<float> B = gen_lcg_floats(N, 67890u);
     std::vector<float> C(static_cast<size_t>(N), 0.0f);
 
     float *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
-    int* d_perm = nullptr;
     CUDA_CHECK(cudaMalloc(&d_A, sizeof(float) * N));
     CUDA_CHECK(cudaMalloc(&d_B, sizeof(float) * N));
     CUDA_CHECK(cudaMalloc(&d_C, sizeof(float) * N));
 
-    std::vector<int> perm;
-    if (stride > 1) {
-        perm = make_stride_permutation(N, stride);
-        // verify bijection once on host
-        std::vector<char> seen(static_cast<size_t>(N), 0);
-        bool bijective = true;
-        for (int idx : perm) {
-            if (idx < 0 || idx >= N || seen[static_cast<size_t>(idx)]) {
-                bijective = false;
-                break;
-            }
-            seen[static_cast<size_t>(idx)] = 1;
-        }
-        report_check("stride permutation bijection", bijective);
-        if (!bijective) std::exit(2);
-        CUDA_CHECK(cudaMalloc(&d_perm, sizeof(int) * N));
-        CUDA_CHECK(cudaMemcpy(d_perm, perm.data(), sizeof(int) * N, cudaMemcpyHostToDevice));
-    }
-
-    // Upload A, B (and the permutation) once — inputs are identical every
-    // iteration, so only the kernel is re-run in the timing loop.
     CUDA_CHECK(cudaMemcpy(d_A, A.data(), sizeof(float) * N, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_B, B.data(), sizeof(float) * N, cudaMemcpyHostToDevice));
 
@@ -106,7 +105,7 @@ int main(int argc, char** argv) {
         if (stride == 1)
             vec_add_coalesced<<<grid, block>>>(d_A, d_B, d_C, N);
         else
-            vec_add_permuted<<<grid, block>>>(d_A, d_B, d_C, d_perm, N);
+            vec_add_permuted<<<grid, block>>>(d_A, d_B, d_C, N, stride, mask, logM);
     };
 
     CudaEventTimer timer;
@@ -122,7 +121,8 @@ int main(int argc, char** argv) {
 
     const double k_ms = compute_stats(k_samples).median;
 
-    // Correctness: copy C back and verify C[i] == A[i]+B[i].
+    // Correctness: full check C[i] == A[i]+B[i] (also proves the arithmetic
+    // permutation is a bijection — any missed/duplicated index would fail).
     CUDA_CHECK(cudaMemcpy(C.data(), d_C, sizeof(float) * N, cudaMemcpyDeviceToHost));
     bool ok = true;
     for (long i = 0; i < N && ok; ++i)
@@ -159,6 +159,5 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaFree(d_A));
     CUDA_CHECK(cudaFree(d_B));
     CUDA_CHECK(cudaFree(d_C));
-    if (d_perm) CUDA_CHECK(cudaFree(d_perm));
     return 0;
 }

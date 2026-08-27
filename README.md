@@ -169,12 +169,15 @@ python3 scripts/plot_gemm.py
 
 ---
 
-## 4. 统一实验原则（已在代码中落实）
+## 4. 实验不变量（target invariants）
+
+> 这些是实验要保证的**控制变量**。实现会尽力满足；GPU profiler（`ncu`）解析仍需在目标机器上做一次 contract test（见 §8）。
 
 1. **CPU/GPU 数学工作一致**：两边执行相同数量的 FLOP（`FLOPs = 2N`），仅平台不同。
-2. **防死代码消除**：所有结果都写入 `volatile` sink 或输出 buffer，并做 correctness check；基准循环的结果被使用，compiler 无法删除。
-3. **Warm-up ≥ 3 次，正式运行 ≥ 10 次**（Experiment 3 的 sweep 默认 10 次，可用 `--iters` 调整），记录 median / mean / stddev，图表优先使用 **median**。
-4. **GPU 区分两种延迟**：
+2. **防死代码消除**：所有结果都写入 `volatile` sink 或输出 buffer，并做 correctness check；基准循环的结果被使用，compiler 无法删除。分支实验的两条路径**计算量相同但算术常数不同**，防止编译器 ICF 合并后把 `if/else` 折叠成无条件计算。
+3. **Same useful bytes**：只改访问排列，不改搬运总量。GPU stride 实验用**算术 permutation（mask/shift）**而非 `perm[]` 全局表，保证每个 stride 都只读 A+B、写 C。
+4. **Warm-up ≥ 3 次，正式运行 ≥ 10 次**（Experiment 3 的 sweep 默认 10 次，可用 `--iters` 调整），记录 median / mean / stddev，图表优先使用 **median**。
+5. **GPU 区分两种延迟**：
    - `kernel_latency_ms`：仅 kernel 在 GPU 上的执行时间（CUDA Events）。
    - `end_to_end_ms`：launch + 数据传输 + kernel + synchronize。
    - 这样能区分「GPU 单线程本身慢」和「GPU offload 有额外 overhead」。
@@ -217,7 +220,7 @@ for (i = 0; i < N/4; ++i) {
 if (data[i] > 0) x += f(data[i]); else x += g(data[i]);
 ```
 
-- `f`/`g` 计算量几乎相同且 `noinline`（保证真实条件分支而非 cmov）。
+- `f`/`g` **计算量相同但算术常数不同**（`0.99/0.01` vs `0.98/0.02`）且 `noinline`：防止编译器 ICF 把两条路径合并成同一函数、进而把 `if/else` 折叠掉——必须保留真实条件分支。
 - **predictable**：全部 `data[i] > 0`；**random**：50/50（固定 seed=42，可复现）。
 - CPU：`perf stat -e cycles,instructions,branches,branch-misses` → `BranchMissRate = branch_misses / branches`。
 - 损失：`Loss = 1 - Throughput(random)/Throughput(predictable)`。
@@ -238,9 +241,9 @@ if (data[i] > 0) x += f(data[i]); else x += g(data[i]);
   - 硬件：`cycles, instructions, cache-references, cache-misses, LLC-loads, LLC-load-misses`。
 - **GPU**（默认 65536 逻辑线程，block=256）：
   - `stride 1`：coalesced grid-stride loop。
-  - `stride s`（2/4/8/16/32）：通过 **permutation 数组**（真正的双射，每个元素恰好处理一次、不遗漏不重复、总 FLOPs/读写量相同），让 warp 内相邻线程访问相隔 `s` 的地址 → 不合并。
+  - `stride s`（2/4/8/16/32/64/128/256）：用**算术 permutation**（`idx = (p % M)·s + (p / M)`，M=N/s，mask/shift 实现，无 `perm[]` 全局表）让 warp 内相邻线程访问相隔 `s` 的地址 → 不合并。每个 stride 只读 A+B、写 C，**总 FLOPs 与搬运字节数完全一致**。
   - 指标：kernel latency / elements/s / Effective Bandwidth。
-  - profiler：`ncu` 采集 DRAM throughput / memory transaction 相关指标（raw report 存 `results/exp2/ncu/`）。
+  - profiler：`ncu`（`scripts/profile_exp2_gpu_memory.sh`）抽取 DRAM throughput / load/store sectors 相关指标。
 
 #### 2B 工作/控制映射
 

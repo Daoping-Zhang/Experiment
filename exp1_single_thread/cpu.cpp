@@ -77,8 +77,11 @@ double independent_f64(long per, int C, double A, double B) {
     return s;
 }
 
-// Two branches of nearly identical cost; `noinline` guarantees a real
-// conditional branch instead of a cmov.
+// Two branches of EQUAL cost (same number of FMA iterations) but DIFFERENT
+// arithmetic constants. The bodies must differ: otherwise the compiler's
+// identical-code-folding merges them into one function and the `if/else`
+// collapses into an unconditional computation, removing the branch entirely.
+// `noinline` keeps them as real calls so a conditional branch survives.
 __attribute__((noinline)) float branch_taken(float v) {
     float r = v;
     for (int k = 0; k < BRANCH_INNER; ++k) r = r * 0.99f + 0.01f;
@@ -87,8 +90,21 @@ __attribute__((noinline)) float branch_taken(float v) {
 
 __attribute__((noinline)) float branch_not_taken(float v) {
     float r = v;
-    for (int k = 0; k < BRANCH_INNER; ++k) r = r * 0.99f + 0.01f;
+    for (int k = 0; k < BRANCH_INNER; ++k) r = r * 0.98f + 0.02f;
     return r;
+}
+
+// Double-precision reference mirroring the branch semantics exactly.
+double branch_ref(const std::vector<float>& data) {
+    double x = 0.0;
+    for (float v : data) {
+        double r = v;
+        const double a = (v > 0.0f) ? 0.99 : 0.98;
+        const double b = (v > 0.0f) ? 0.01 : 0.02;
+        for (int k = 0; k < BRANCH_INNER; ++k) r = r * a + b;
+        x += r;
+    }
+    return x;
 }
 
 float branch_sum(const float* data, long N) {
@@ -212,11 +228,15 @@ void run_branch_case(int argc, char** argv) {
 
     const float result = branch_sum(data.data(), N);
     sink(result);
-    std::fprintf(stderr, "[cpu] branch(%s): result=%.3f (sanity, non-NaN)\n", data_mode.c_str(), result);
-    if (!std::isfinite(result)) {
-        std::fprintf(stderr, "branch result is not finite\n");
+    const double reference = branch_ref(data);
+    const bool ok = nearly_equal(result, static_cast<float>(reference), 5e-3f);
+    report_check("cpu branch (" + data_mode + ") vs double reference", ok);
+    if (!ok) {
+        std::fprintf(stderr, "  result=%.6f reference=%.6f\n", result, static_cast<float>(reference));
         std::exit(2);
     }
+    std::fprintf(stderr, "[cpu] branch(%s): result=%.3f (vs reference %.3f)\n", data_mode.c_str(),
+                 result, static_cast<float>(reference));
 
     std::function<float()> fn = [&] { return branch_sum(data.data(), N); };
     const Stats st = run_benchmark(fn, warmup, iters);

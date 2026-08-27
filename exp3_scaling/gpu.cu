@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
         std::printf("Requested logical threads : %ld\n", G);
         std::printf("Block size                : %u\n", block.x);
         std::printf("Grid size                 : %u\n", grid.x);
-        std::printf("Logical warps             : %ld\n", G / 32);
+        std::printf("Logical warps             : %ld\n", (G + 31) / 32);
         std::printf("Launch                    : <<<%u, %u>>>\n", grid.x, block.x);
         return 0;
     }
@@ -133,7 +133,7 @@ int main(int argc, char** argv) {
         r.add("Logical threads", std::to_string(G));
         r.add("Block size", std::to_string(block.x));
         r.add("Grid size", std::to_string(grid.x));
-        r.add("Logical warps", std::to_string(G / 32));
+        r.add("Logical warps", std::to_string((G + 31) / 32));
         r.add("Elements", std::to_string(N));
         r.add("Compute iterations/elem", std::to_string(K));
         r.add("Kernel latency", fmt(k_ms) + " ms");

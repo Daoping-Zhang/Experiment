@@ -9,6 +9,6 @@ BIN="$ROOT_DIR/bin/exp2_gpu_control"
 dist="${1:-grouped}"
 
 exec python3 "$SCRIPT_DIR/ncu_profile.py" \
-  --patterns "branch,divergent,warp,lane,active,uniform,inst_executed,gpu__time_duration" \
-  --label "GPU work/control profile ($dist)" \
+  --preset divergence \
+  --label "GPU divergence evidence ($dist)" \
   -- "$BIN" --distribution "$dist" --threads 65536 --tasks 1048576 --iters 1

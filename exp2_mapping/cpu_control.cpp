@@ -116,15 +116,45 @@ int main(int argc, char** argv) {
     }
     sink(sum);
 
-    const Stats st = run_benchmark(run, warmup, iters);
-    const double latency_ms = st.median * 1e3;
-    const double throughput = static_cast<double>(N) / st.median;
+    // Timed runs: record overall wall time AND per-thread times for the same
+    // run, so application latency and imbalance evidence come from the SAME
+    // measurement. Report medians, and show the per-thread chart of the run
+    // whose overall time is closest to the median.
+    struct RunRec {
+        double overall_ms = 0.0;
+        std::vector<double> thread_ms;
+        double imbalance = 0.0;
+    };
+    std::vector<RunRec> timed;
+    timed.reserve(iters);
+    for (int i = 0; i < warmup; ++i) run();
+    for (int i = 0; i < iters; ++i) {
+        const double t0 = now_seconds();
+        run();
+        const double t1 = now_seconds();
+        RunRec rec;
+        rec.overall_ms = (t1 - t0) * 1e3;
+        rec.thread_ms = thread_times;
+        const double rm = *std::max_element(thread_times.begin(), thread_times.end());
+        const double ra = std::accumulate(thread_times.begin(), thread_times.end(), 0.0) / T;
+        rec.imbalance = ra > 0.0 ? rm / ra : 0.0;
+        timed.push_back(std::move(rec));
+    }
 
-    // Per-thread imbalance from the last (steady-state) timed run.
-    const double mx = *std::max_element(thread_times.begin(), thread_times.end());
-    const double mn = *std::min_element(thread_times.begin(), thread_times.end());
-    const double avg = std::accumulate(thread_times.begin(), thread_times.end(), 0.0) / T;
-    const double ratio = avg > 0.0 ? mx / avg : 0.0;
+    std::vector<double> overall_ms, imbalance;
+    for (const auto& r : timed) { overall_ms.push_back(r.overall_ms); imbalance.push_back(r.imbalance); }
+    std::sort(overall_ms.begin(), overall_ms.end());
+    std::sort(imbalance.begin(), imbalance.end());
+    const double latency_ms = overall_ms[overall_ms.size() / 2];
+    const double throughput = static_cast<double>(N) / (latency_ms * 1e-3);
+    const double ratio = imbalance[imbalance.size() / 2];
+
+    const RunRec* best = &timed[0];
+    for (const auto& r : timed)
+        if (std::fabs(r.overall_ms - latency_ms) < std::fabs(best->overall_ms - latency_ms)) best = &r;
+    const double mx = *std::max_element(best->thread_ms.begin(), best->thread_ms.end());
+    const double mn = *std::min_element(best->thread_ms.begin(), best->thread_ms.end());
+    const double avg = std::accumulate(best->thread_ms.begin(), best->thread_ms.end(), 0.0) / T;
 
     std::fprintf(stderr, "[cpu] %s: latency=%.3f ms  %.3e tasks/s  max/avg/min=%.2f/%.2f/%.2f ms  "
                 "imbalance=%.3f\n",
@@ -133,7 +163,7 @@ int main(int argc, char** argv) {
     if (has_arg(argc, argv, "--thread-times")) {
         std::fprintf(stderr, "per-thread times (ms):\n");
         for (int t = 0; t < T; ++t)
-            std::fprintf(stderr, "  Thread %d  %.2f\n", t, thread_times[static_cast<size_t>(t)]);
+            std::fprintf(stderr, "  Thread %d  %.2f\n", t, best->thread_ms[static_cast<size_t>(t)]);
     }
 
     if (human_format(argc, argv)) {
@@ -144,16 +174,16 @@ int main(int argc, char** argv) {
         r.add("Threads", std::to_string(T));
         r.add("Tasks", std::to_string(N));
         r.add("Heavy / Light", std::to_string(HEAVY) + " / " + std::to_string(LIGHT) + " iters");
-        r.add("Overall latency", fmt(latency_ms) + " ms");
+        r.add("Overall latency (median)", fmt(latency_ms) + " ms");
         r.add("Throughput", fmt(throughput, 3) + " tasks/s");
         r.add("Slowest thread", fmt(mx) + " ms");
         r.add("Fastest thread", fmt(mn) + " ms");
         r.add("Average thread", fmt(avg) + " ms");
-        r.add("Load imbalance (max/avg)", fmt(ratio));
+        r.add("Load imbalance (median)", fmt(ratio));
         r.print();
-        std::printf("  per-thread times:\n");
+        std::printf("  per-thread times (run closest to median):\n");
         for (int t = 0; t < T; ++t)
-            std::printf("    Thread %d  %.2f ms\n", t, thread_times[static_cast<size_t>(t)]);
+            std::printf("    Thread %d  %.2f ms\n", t, best->thread_ms[static_cast<size_t>(t)]);
         std::printf("\n");
     } else {
         emit(csv_file,
