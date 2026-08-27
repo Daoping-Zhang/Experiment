@@ -106,11 +106,10 @@ int main(int argc, char** argv) {
     const std::string csv_file = get_arg(argc, argv, "--csv-file", "");
 
     const std::vector<int> sizes = parse_sizes(sizes_arg);
-    const bool require_blas = has_arg(argc, argv, "--require-blas");
 #ifdef HAVE_CBLAS
     std::fprintf(stderr, "[gemm] using optimized CBLAS\n");
 #else
-    if (require_blas) {
+    if (has_arg(argc, argv, "--require-blas")) {
         std::fprintf(stderr,
                      "ERROR: --require-blas was set but no optimized CBLAS is available.\n"
                      "       The fallback GEMM must not be used for CPU-vs-GPU teaching.\n"

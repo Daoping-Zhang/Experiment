@@ -17,7 +17,9 @@ CXXFLAGS := -O3 -std=c++17 -pthread -Wall
 NVCC := $(shell command -v nvcc 2>/dev/null || { [ -x /usr/local/cuda/bin/nvcc ] && echo /usr/local/cuda/bin/nvcc; })
 NVCCFLAGS := -O3 -std=c++17
 CUDA_ARCH ?= -arch=native
-BLAS_FLAGS := $(shell bash scripts/detect_blas.sh)
+BLAS_CFG := $(shell bash scripts/detect_blas.sh)
+BLAS_DEFS := $(filter -D%,$(BLAS_CFG))       # e.g. -DUSE_CBLAS
+BLAS_LIBS := $(filter-out -D%,$(BLAS_CFG))   # e.g. -lopenblas / -framework Accelerate
 
 CPU_BINS := $(BIN)/exp1_cpu $(BIN)/exp2_cpu_memory $(BIN)/exp2_cpu_control \
             $(BIN)/exp3_cpu $(BIN)/ai_gemm_cpu
@@ -59,7 +61,7 @@ $(BIN)/exp3_cpu: exp3_scaling/cpu.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
 $(BIN)/ai_gemm_cpu: ai_gemm/cpu_gemm.cpp | $(BIN)
-	$(CXX) $(CXXFLAGS) $(BLAS_FLAGS) $< -o $@
+	$(CXX) $(CXXFLAGS) $(BLAS_DEFS) $< $(BLAS_LIBS) -o $@
 
 $(BIN)/exp1_gpu: exp1_single_thread/gpu.cu | $(BIN)
 	$(NVCC) $(NVCCFLAGS) $(CUDA_ARCH) $< -o $@
