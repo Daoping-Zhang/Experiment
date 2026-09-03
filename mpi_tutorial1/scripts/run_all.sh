@@ -19,7 +19,7 @@ RUNNER="$(command -v mpiexec || command -v mpirun || true)"
 
 # OpenMPI forbids running as root; allow it inside containers when needed.
 OPTS=""
-if [ "$(id -u)" = "0" ] && "$RUNNER" --version 2>&1 | grep -qi "open mpi"; then
+if [ "$(id -u)" = "0" ] && "$RUNNER" --version 2>&1 | grep -qiE "open ?mpi|openrte"; then
     OPTS="--allow-run-as-root"
 fi
 

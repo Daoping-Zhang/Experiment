@@ -62,7 +62,7 @@ fi
 # --- 4. run the minimal program ----------------------------------------------
 if [ -n "$RUNNER" ]; then
     OPTS=""
-    if [ "$(id -u)" = "0" ] && "$RUNNER" --version 2>&1 | grep -qi "open mpi"; then
+    if [ "$(id -u)" = "0" ] && "$RUNNER" --version 2>&1 | grep -qiE "open ?mpi|openrte"; then
         OPTS="--allow-run-as-root"
     fi
     if "$RUNNER" $OPTS -n 2 "$TMPD/check" >/dev/null 2>&1; then

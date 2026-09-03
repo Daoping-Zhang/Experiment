@@ -17,7 +17,7 @@ fi
 
 # OpenMPI as root (containers) needs --allow-run-as-root.
 OPTS=""
-if [ "$(id -u)" = "0" ] && "$RUNNER" --version 2>&1 | grep -qi "open mpi"; then
+if [ "$(id -u)" = "0" ] && "$RUNNER" --version 2>&1 | grep -qiE "open ?mpi|openrte"; then
     OPTS="--allow-run-as-root"
 fi
 
