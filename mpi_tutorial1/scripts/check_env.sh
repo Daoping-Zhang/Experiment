@@ -61,9 +61,12 @@ fi
 
 # --- 4. run the minimal program ----------------------------------------------
 if [ -n "$RUNNER" ]; then
+    # OpenMPI specifics: as root it needs --allow-run-as-root, and on small
+    # hosts it may need --oversubscribe to launch more processes than cores.
     OPTS=""
-    if [ "$(id -u)" = "0" ] && "$RUNNER" --version 2>&1 | grep -qiE "open ?mpi|openrte"; then
-        OPTS="--allow-run-as-root"
+    if "$RUNNER" --version 2>&1 | grep -qiE "open ?mpi|openrte"; then
+        OPTS="--oversubscribe"
+        [ "$(id -u)" = "0" ] && OPTS="--allow-run-as-root $OPTS"
     fi
     if "$RUNNER" $OPTS -n 2 "$TMPD/check" >/dev/null 2>&1; then
         say_pass "MPI run test ($RUNNER -n 2)"

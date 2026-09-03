@@ -15,10 +15,12 @@ if [ -z "$RUNNER" ]; then
     exit 1
 fi
 
-# OpenMPI as root (containers) needs --allow-run-as-root.
+# OpenMPI specifics: as root it needs --allow-run-as-root, and on small hosts
+# it may need --oversubscribe to launch more processes than physical cores.
 OPTS=""
-if [ "$(id -u)" = "0" ] && "$RUNNER" --version 2>&1 | grep -qiE "open ?mpi|openrte"; then
-    OPTS="--allow-run-as-root"
+if "$RUNNER" --version 2>&1 | grep -qiE "open ?mpi|openrte"; then
+    OPTS="--oversubscribe"
+    [ "$(id -u)" = "0" ] && OPTS="--allow-run-as-root $OPTS"
 fi
 
 # Portable timeout: run a command, kill it if it exceeds N seconds.
