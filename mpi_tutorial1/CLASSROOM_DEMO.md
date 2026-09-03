@@ -12,7 +12,22 @@ cd ~/Experiment/mpi_tutorial1
 git pull                 # 拿到最新代码
 make clean && make       # 编译（会显示完整编译命令）
 ./scripts/check_env.sh   # 环境自检，全部 [PASS] 才开课
+
+# 如果你以 root 运行（OpenMPI 默认禁止 root），先设两个环境变量：
+export OMPI_ALLOW_RUN_AS_ROOT=1
+export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+
+# 小规格主机（物理核数 < 演示进程数）会有 "not enough slots" 限制：
+# 这是 OpenMPI 把物理核数当 slot。下面这条环境变量等价于每次加
+# --oversubscribe，设置后裸 mpirun -n 4 也能直接跑：
+export OMPI_MCA_rmaps_base_oversubscribe=1
+
+# 三个 export 都可写进 ~/.bashrc 免重复设置
 ```
+
+> 两种运行方式的区别：
+> - **脚本**（`./scripts/run_all.sh`、`verify.sh`）自动处理 root（`--allow-run-as-root`）与小主机（`--oversubscribe`）问题，不用你操心。
+> - **手动敲命令**：把上面三个 export 放进 `~/.bashrc` 后，直接 `mpirun -n 4 ./bin/hello_mpi` 即可；不想设环境变量就临时加 flag：`mpirun --allow-run-as-root --oversubscribe -n 4 ./bin/hello_mpi`。
 
 课堂开头对全班说一句：
 > 一个 executable + `mpiexec -n P` → P 个独立进程。今天看两件事：怎么造多进程、两个进程怎么说话。
