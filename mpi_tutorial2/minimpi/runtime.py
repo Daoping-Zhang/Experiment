@@ -57,6 +57,7 @@ class MiniRuntime:
         self.size = size
         self.control = control
         self.mode = mode
+        self.advertise_ip = None
         self.events = EventLog()
         self.local_value = None
         # teaching-mode hooks (set by worker / teacher before a run):
@@ -79,6 +80,7 @@ class MiniRuntime:
             host, port = server, 9000
         self.control = SendRecvControl(host, port)
         ip = _detect_ip(host)
+        self.advertise_ip = ip
         self.control.send({"t": P.C_JOIN, "name": name, "host": ip,
                            "port": self.transport.port})
         welcome = self.control.recv()

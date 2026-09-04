@@ -44,7 +44,6 @@ def scenario_imports():
         import minimpi.transport
         import minimpi.communicator
         import minimpi.metrics
-        import minimpi.synchronization
         import minimpi.runtime
         import minimpi.collectives_dispatch
         for m in ("ping_pong", "naive_reduce", "naive_allreduce",
@@ -138,6 +137,15 @@ def main():
         "[36,44,52,60]", size=8)
     e2e("4MB payload naive_allreduce", "naive_allreduce", "performance",
         None, payload=4 * 1024 * 1024)
+
+    for mode in ("performance", "teaching"):
+        name = "ping_pong %s" % mode
+        r = Runner(4)
+        log, ok, timed = r.run_demo(["--demo", "ping_pong", "--mode", mode])
+        r.close()
+        check(name, not timed and "Errors:" not in log and len(finals_from(log)) == 4,
+              "ping_pong %s completed" % mode)
+
 
     print("\n========================================")
     print("Results: %d passed, %d failed" % (len(_passed), len(_failed)))

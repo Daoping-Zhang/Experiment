@@ -119,7 +119,7 @@ def main():
 
     print("[PASS] Connected")
     print("\nName: %s\nMy Rank: %d\nWorld Size: %d\nMy Endpoint: %s:%d\n" %
-          (args.name, rt.rank, rt.size, rt.transport.host, rt.transport.port))
+          (args.name, rt.rank, rt.size, rt.advertise_ip, rt.transport.port))
     print("Waiting for teacher commands...")
 
     while not shell.shutdown.wait(1.0):
