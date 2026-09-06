@@ -103,6 +103,7 @@ class Coordinator:
         self.auto = auto
 
         self.workers = {}            # rank -> control socket
+        self.names = {0: "Teacher"}  # rank -> human-readable name
         self.peers = {0: {"host": self.advertise, "port": None}}
         self.lock = threading.Lock()
         self.next_rank = 1
@@ -144,6 +145,7 @@ class Coordinator:
                 rank = self.next_rank
                 self.next_rank += 1
                 self.workers[rank] = conn
+                self.names[rank] = msg.get("name") or ("Student %d" % rank)
                 self.peers[rank] = {"host": msg["host"], "port": int(msg["port"])}
             welcome = {"t": P.C_WELCOME, "rank": rank, "size": self.size,
                        "peers": self.peers}
@@ -177,6 +179,9 @@ class Coordinator:
             agg.worker_done(rank, value=val, error=m.get("error"))
         elif t == P.C_ERROR:
             print("[ERROR from rank %d] %s" % (rank, m.get("why", "")))
+
+    def name_of(self, rank):
+        return "%s [Rank %d]" % (self.names.get(rank, "Rank %d" % rank), rank)
 
     def connectivity_check(self):
         print("\n========================================\nPeer Connectivity "
@@ -264,23 +269,29 @@ class Coordinator:
         """Rank-0 barrier leg: show the global view of round rnd, then let the
         class proceed. Runs on the teacher's rank-0 thread."""
         agg.wait_round_events(rnd, need=self.size - 1, timeout=30)
-        remote = agg.round_events.get(rnd, [])
-        local = [e.to_dict() for e in self.events0.by_round(rnd)]
+        # teaching-barrier traffic is classified kind="barrier" and hidden;
+        # the global view shows only the collective's real communication.
+        remote = [e for e in agg.round_events.get(rnd, [])
+                  if e.get("kind") != "barrier"]
+        local = [e.to_dict() for e in self.events0.by_round(rnd)
+                 if e.kind != "barrier"]
         self._print_round(rnd, remote + local)
         if not self.auto:
             input("\nPress ENTER for next round.")
 
     def _print_round(self, rnd, events):
-        print("\n---------------- Round %d ----------------" % rnd)
+        print("\n--------------- Round %d ----------------" % rnd)
         seen = set()
         for e in events:
-            key = (e.get("source"), e.get("destination"))
+            src, dst = e.get("source"), e.get("destination")
+            key = (src, dst)
             if key in seen:
                 continue
             seen.add(key)
             dt = e.get("transfer_time_ms", 0)
-            print("Rank %d -> Rank %d   %d B   %.3f ms" %
-                  (e["source"], e["destination"], e.get("payload_bytes", 0), dt))
+            print("%s -> %s    %d B   %.3f ms" %
+                  (self.name_of(src), self.name_of(dst),
+                   e.get("payload_bytes", 0), dt))
 
     def shutdown(self):
         self.closed = True
@@ -357,6 +368,10 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True):
     print("\n== Demo: %s  mode=%s ==" % (algo, mode))
     if payload:
         print("payload: %d bytes (op=xor, fmt=raw)" % payload)
+    else:
+        params["data_size"] = vector_len
+        print("data size: %d elements  (int32 -> payload %d B per element "
+              "exchange)" % (vector_len, vector_len * P.ELEMENT_BYTES))
     t0 = time.time()
     agg = coord.run_demo(params, mode)
     dt = time.time() - t0
@@ -420,6 +435,8 @@ def main():
     ap.add_argument("--demo", default="", help="run one demo then exit")
     ap.add_argument("--mode", default="teaching")
     ap.add_argument("--payload", type=int, default=0)
+    ap.add_argument("--data-size", type=int, default=0,
+                    help="elements per rank (i32); menu default 16")
     ap.add_argument("--benchmark", action="store_true")
     args = ap.parse_args()
 
@@ -438,12 +455,18 @@ def main():
     wait_ready(coord, args.size)
     coord.connectivity_check()
 
+    def roster():
+        return ", ".join("%s [Rank %d]" % (coord.names.get(r, "?"), r)
+                         for r in range(coord.size))
+    print("Workers Ready: %d / %d   (%s)" % (args.size, args.size, roster()))
+
     if args.benchmark:
         run_benchmark(coord)
         coord.shutdown()
         return
     if args.demo:
-        run_demo(coord, args.demo, args.mode, payload=args.payload)
+        run_demo(coord, args.demo, args.mode, payload=args.payload,
+                 vector_len=args.data_size)
         coord.shutdown()
         return
 
@@ -471,11 +494,20 @@ def main():
         except (ValueError, IndexError):
             print("invalid choice")
             continue
-        mode = args.mode
-        if mode not in ("teaching", "performance"):
-            mode = input("Mode (teaching/performance) [teaching]: ").strip() or "teaching"
-        vector = coord.size if algo == "ring_allreduce" else 0
-        run_demo(coord, algo, mode, vector_len=vector)
+
+        # --- interactive run setup: data size -> mode -------------------
+        print("\nAlgorithm: %s" % algo)
+        ds = input("\nData Size (elements, int32 = %d B/elem, default 16):\n> " % P.ELEMENT_BYTES).strip()
+        ds = int(ds) if ds.isdigit() and int(ds) > 0 else 16
+        if algo == "ring_allreduce" and ds % coord.size:
+            ds = (ds // coord.size) * coord.size
+            print("(ring requires size-divisible vector; using data size %d)" % ds)
+        print("\nMode:")
+        print("1. Teaching")
+        print("2. Performance")
+        m = input("\nSelect: ").strip()
+        mode = "teaching" if m != "2" else "performance"
+        run_demo(coord, algo, mode, vector_len=ds)
 
     coord.shutdown()
     print("Bye.")

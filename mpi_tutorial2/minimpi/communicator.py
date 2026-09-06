@@ -91,12 +91,12 @@ class Communicator:
 
     # ------------------------------------------------------------------ send
     def send(self, value, dest, tag=0, fmt=P.FMT_INT32, algo="", phase="",
-             rnd=0):
+             rnd=0, kind=P.KIND_ALGO):
         """Blocking send. Returns after the frame is written to the socket."""
         payload = encode(value, fmt)
         header = P.make_header(src=self.rank, dst=dest, tag=tag, fmt=fmt,
                                plen=len(payload), rnd=rnd, phase=phase,
-                               algo=algo)
+                               algo=algo, kind=kind)
         t0 = now_ns()
         self.transport.send_to(dest, header, payload)
         t1 = now_ns()
@@ -105,7 +105,7 @@ class Communicator:
 
     # ------------------------------------------------------------------ recv
     def recv(self, source=ANY_SOURCE, tag=ANY_TAG, timeout=None, fmt=None,
-             algo="", phase="", rnd=0):
+             algo="", phase="", rnd=0, kind=P.KIND_ALGO):
         """Blocking receive matched by (source, tag). Returns the decoded
         value. A CommunicationEvent is recorded on success."""
         t0 = now_ns()
@@ -130,6 +130,7 @@ class Communicator:
         ev = CommunicationEvent(
             algorithm=header.get("algo", ""),
             phase=header.get("phase", ""),
+            kind=header.get("kind", P.KIND_ALGO),
             logical_round=header.get("rnd", 0),
             source=header.get("src", self.rank),
             destination=header.get("dst", self.rank),

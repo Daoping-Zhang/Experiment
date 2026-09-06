@@ -35,6 +35,11 @@ TAG_DATA = 0
 TAG_CONTROL = 1
 CTRL_TAG_BASE = 7000       # teaching barrier / sync tags (control plane)
 
+# Event / message classification: what a message is FOR.
+KIND_ALGO = "algorithm"    # real collective payload communication
+KIND_BARRIER = "barrier"   # teaching synchronization traffic (hide from view)
+ELEMENT_BYTES = 4          # one int32 element (current i32 data type)
+
 FMT_INT32 = "i32"     # struct int32 vector (list of ints)
 FMT_FLOAT64 = "f64"   # struct float64 vector (list of floats)
 FMT_RAW = "raw"       # opaque bytes (benchmark payload / big-int XOR reduce)
@@ -90,7 +95,7 @@ def _recv_exact(sock, n):
 
 
 def make_header(**kw):
-    h = {"ver": 1, "kind": KIND_DATA, "src": ANY_SOURCE, "dst": ANY_SOURCE,
+    h = {"ver": 1, "kind": KIND_ALGO, "src": ANY_SOURCE, "dst": ANY_SOURCE,
          "tag": 0, "fmt": FMT_RAW, "plen": 0, "rnd": 0, "phase": "", "algo": "", "ts": 0}
     h.update(kw)
     return h

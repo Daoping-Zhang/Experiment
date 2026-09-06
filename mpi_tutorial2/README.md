@@ -30,6 +30,23 @@ MPI_Send(&value, 1, MPI_INT, 1, 0, MPI_COMM_WORLD);   /* Tutorial 1 视角 */
 ```
 （collective 匹配用独立 tag；teaching 同步消息用 `CTRL_TAG_BASE` 起，见 `minimpi/protocol.py`。）
 
+## 1.5 课堂阅读路径
+
+学生主要阅读：
+
+```text
+collectives/          # 每个 collective 只看 comm.send / comm.recv
+```
+
+基础设施（一般不在课堂展开）：
+
+```text
+teacher.py  worker.py  minimpi/  scripts/  tests/
+```
+
+学生终端看到的是 **MPI 通信视角**（Round / SEND / RECV / Peer / Payload），
+不会暴露 socket / protocol / thread / transport 细节。
+
 ## 2. 目录
 
 ```
@@ -64,18 +81,27 @@ mpi_tutorial2/
 ```bash
 python3 scripts/check_env.py          # 环境自检（零第三方依赖）
 
-# 课堂：一台机器上开 teacher
+# 课堂：一台机器上开 teacher（交互式）
 python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
 # 学生/多终端：每个 worker
 python3 worker.py --server <teacher-ip>:9000 --name Alice
 
-# 或单机一把跑（真实子进程 teacher + 3 workers）
-python3 scripts/local_demo.py --size 4 --demo tree_allreduce --mode teaching
-python3 scripts/local_demo.py --size 4 --demo ring_allreduce --mode performance
+# Teacher 主菜单选择 Algorithm 后依次设置：
+#   Data Size（元素个数，int32 = 4 B/元素；默认 16）
+#   Mode（1 Teaching / 2 Performance）
+# 可连续换算法 / 换 Data Size / 换模式，Worker 无需重启。
 
-# 验收
-python3 scripts/verify.py
+# 自动模式（验收 / 本地测试，不受课堂 UI 影响）
+python3 teacher.py --size 4 --demo naive_allreduce --mode teaching --auto
+python3 teacher.py --size 4 --demo tree_allreduce --mode performance --data-size 16
+
+# 单机一把跑（真实子进程 teacher + 3 workers）
+python3 scripts/local_demo.py --size 4 --demo tree_allreduce --mode teaching
+python3 scripts/verify.py            # 自动验收
 ```
+
+课堂演示数据约定：`Data Size = N` 表示每 rank 发送 **N 个 int32 元素**，
+单条算法消息 payload = N × 4 B（barrier 同步消息为 4 B 且不计入通信视图）。
 
 ## 4. 课堂演示主线
 

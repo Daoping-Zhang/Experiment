@@ -18,6 +18,7 @@ class CommunicationEvent:
     """One point-to-point message, seen from one side."""
     algorithm: str = ""
     phase: str = ""            # e.g. "reduce", "broadcast", "reduce-scatter"
+    kind: str = "algorithm"    # "algorithm" | "barrier" (teaching sync)
     logical_round: int = 0     # algorithm label / log grouping
     source: int = -1
     destination: int = -1

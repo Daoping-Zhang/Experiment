@@ -25,15 +25,19 @@ def barrier(comm, rnd, on_root_ready=None):
     if comm.rank == root:
         for _ in range(1, comm.size):
             comm.recv(source=P.ANY_SOURCE, tag=tag, fmt="i32",
-                      algo="teaching-barrier", phase="sync-wait", rnd=rnd)
+                      algo="teaching-barrier", phase="sync-wait", rnd=rnd,
+                      kind=P.KIND_BARRIER)
         if on_root_ready is not None:
             on_root_ready(rnd)
         for dst in range(1, comm.size):
             comm.send([1], dest=dst, tag=tag, fmt="i32",
-                      algo="teaching-barrier", phase="sync-go", rnd=rnd)
+                      algo="teaching-barrier", phase="sync-go", rnd=rnd,
+                      kind=P.KIND_BARRIER)
     else:
         comm.send([1], dest=root, tag=tag, fmt="i32",
-                  algo="teaching-barrier", phase="sync-wait", rnd=rnd)
+                  algo="teaching-barrier", phase="sync-wait", rnd=rnd,
+                  kind=P.KIND_BARRIER)
         comm.recv(source=root, tag=tag, fmt="i32",
-                  algo="teaching-barrier", phase="sync-go", rnd=rnd)
+                  algo="teaching-barrier", phase="sync-go", rnd=rnd,
+                  kind=P.KIND_BARRIER)
     return True

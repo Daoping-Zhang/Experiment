@@ -29,15 +29,25 @@ def run_demo(rt, control, params):
 
     mode = params.get("mode", "performance")
     rt.mode = mode
+    rt.run_meta = {"algorithm": params.get("algorithm", ""),
+                   "data_size": params.get("data_size", params.get("vector_len", 0)),
+                   "vector_len": params.get("vector_len", 0),
+                   "fmt": params.get("fmt", "i32")}
     if mode == "teaching":
         from minimpi import barrier as BarrierMod
+        rt.show_ui = True
         rt._report = lambda rnd, evs: control.send(
             {"t": P.C_ROUND_DONE, "rnd": rnd,
              "events": [e.to_dict() for e in evs]})
         rt._barrier = lambda rnd: BarrierMod.barrier(rt.comm, rnd)
+        rt._on_round = lambda rnd: _show_round(rt, rnd)
+        print("\nAlgorithm: %s   Data Size: %s   World Size: %d\n" %
+              (rt.run_meta["algorithm"], rt.run_meta["data_size"], rt.size))
     else:
+        rt.show_ui = False
         rt._report = None
         rt._barrier = None
+        rt._on_round = None
 
     try:
         result = rt.run_algorithm(params)
@@ -57,6 +67,25 @@ def _encode(value):
     if isinstance(value, list):
         return {"vec": value}
     return {"vec": [value]}
+
+
+def _show_round(rt, rnd):
+    """Student local view for one finished logical round (teaching mode)."""
+    meta = rt.run_meta
+    alg = meta.get("algorithm", "")
+    ds = meta.get("data_size", "")
+    evs = [e for e in rt.comm.events.by_round(rnd) if e.kind == "algorithm"]
+    print("\nRound %d    (algorithm: %s, data size: %s)" % (rnd, alg, ds))
+    if not evs:
+        print("  (this rank does not communicate this round)")
+    for e in evs:
+        if e.side == "send":
+            print("  SEND  %s [Rank %d] -> Rank %d    payload %d B" %
+                  (rt.name, rt.rank, e.destination, e.payload_bytes))
+        else:
+            print("  RECV  %s [Rank %d] <- Rank %d    payload %d B" %
+                  (rt.name, rt.rank, e.source, e.payload_bytes))
+    print("  (waiting for next round...)")
 
 
 class WorkerShell:

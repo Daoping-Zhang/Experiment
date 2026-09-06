@@ -63,6 +63,9 @@ class MiniRuntime:
         # teaching-mode hooks (set by worker / teacher before a run):
         self._report = None   # callable(rnd, round_events)  — async event upload
         self._barrier = None  # callable(rnd)                — data-plane barrier
+        self._on_round = None # callable(rnd) — worker local per-round display
+        self.show_ui = False  # only the student worker renders local views
+        self.run_meta = {}    # algorithm / data_size / vector_len / fmt
 
         self.transport = transport if transport is not None else PeerTransport(name, bind_host)
         self.comm = Communicator(self.transport, rank if rank is not None else 0,
@@ -103,6 +106,8 @@ class MiniRuntime:
         barrier — rank 0 releases it manually after showing the round view.
         """
         if self.mode == "teaching":
+            if self.show_ui and self._on_round is not None:
+                self._on_round(rnd)          # student local view (before sync)
             if self._report is not None:
                 self._report(rnd, self.events.by_round(rnd))
             if self._barrier is not None:
