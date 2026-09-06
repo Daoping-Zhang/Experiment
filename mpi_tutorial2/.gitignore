@@ -1,3 +1,6 @@
 # Python caches
 __pycache__/
 *.pyc
+
+# stray
+mpi_tutorial2/=
