@@ -85,7 +85,8 @@ class MiniRuntime:
         ip = _detect_ip(host)
         self.advertise_ip = ip
         self.control.send({"t": P.C_JOIN, "name": name, "host": ip,
-                           "port": self.transport.port})
+                           "port": self.transport.port,
+                           "value": getattr(self, "base", None)})
         welcome = self.control.recv()
         if welcome is None or welcome.get("t") != P.C_WELCOME:
             raise RuntimeError("did not receive welcome from teacher")

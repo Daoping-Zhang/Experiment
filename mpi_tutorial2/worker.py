@@ -11,6 +11,8 @@ import socket
 import sys
 import threading
 
+from minimpi.metrics import fmt_bytes
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from minimpi import protocol as P  # noqa: E402
@@ -41,8 +43,9 @@ def run_demo(rt, control, params):
              "events": [e.to_dict() for e in evs]})
         rt._barrier = lambda rnd: BarrierMod.barrier(rt.comm, rnd)
         rt._on_round = lambda rnd: _show_round(rt, rnd)
-        print("\nAlgorithm: %s   Data Size: %s   World Size: %d\n" %
-              (rt.run_meta["algorithm"], rt.run_meta["data_size"], rt.size))
+        print("\nAlgorithm: %s   Data Size: %s   World Size: %d   My value: %s\n" %
+              (rt.run_meta["algorithm"], rt.run_meta["data_size"], rt.size,
+               getattr(rt, "base", "?")))
     else:
         rt.show_ui = False
         rt._report = None
@@ -80,11 +83,11 @@ def _show_round(rt, rnd):
         print("  (this rank does not communicate this round)")
     for e in evs:
         if e.side == "send":
-            print("  SEND  %s [Rank %d] -> Rank %d    payload %d B" %
-                  (rt.name, rt.rank, e.destination, e.payload_bytes))
+            print("  SEND  %s [Rank %d] -> Rank %d    payload %s" %
+                  (rt.name, rt.rank, e.destination, fmt_bytes(e.payload_bytes)))
         else:
-            print("  RECV  %s [Rank %d] <- Rank %d    payload %d B" %
-                  (rt.name, rt.rank, e.source, e.payload_bytes))
+            print("  RECV  %s [Rank %d] <- Rank %d    payload %s" %
+                  (rt.name, rt.rank, e.source, fmt_bytes(e.payload_bytes)))
     print("  (waiting for next round...)")
 
 
@@ -137,12 +140,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--server", default="127.0.0.1:9000", help="teacher ip:port")
     ap.add_argument("--name", default="student", help="your display name")
+    ap.add_argument("--value", type=int, default=None,
+                    help="your initial value; vector = [value] x data_size")
     args = ap.parse_args()
 
     print("========================================\nMiniMPI Worker\n========================================")
     print("Connecting to coordinator (%s)..." % args.server)
 
     rt = MiniRuntime(name=args.name)
+    rt.base = args.value
     rt.register_with_teacher(args.server, args.name)
     shell = WorkerShell(rt)
 

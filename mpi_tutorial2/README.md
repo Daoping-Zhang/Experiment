@@ -83,13 +83,16 @@ python3 scripts/check_env.py          # 环境自检（零第三方依赖）
 
 # 课堂：一台机器上开 teacher（交互式）
 python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
-# 学生/多终端：每个 worker
-python3 worker.py --server <teacher-ip>:9000 --name Alice
+# 学生/多终端：每个 worker 输入自己的初始数值
+python3 worker.py --server <teacher-ip>:9000 --name Alice --value 5
+python3 worker.py --server <teacher-ip>:9000 --name Bob   --value 10
+python3 worker.py --server <teacher-ip>:9000 --name Charlie --value 20
 
 # Teacher 主菜单选择 Algorithm 后依次设置：
-#   Data Size（元素个数，int32 = 4 B/元素；默认 16）
+#   Data Size（每个 rank 的向量长度；该 rank 的向量 = [学生初值] * Data Size）
 #   Mode（1 Teaching / 2 Performance）
 # 可连续换算法 / 换 Data Size / 换模式，Worker 无需重启。
+# Teacher(rank 0) 初值用 --value（默认 1），学生用 --value 各自输入。
 
 # 自动模式（验收 / 本地测试，不受课堂 UI 影响）
 python3 teacher.py --size 4 --demo naive_allreduce --mode teaching --auto
@@ -100,8 +103,10 @@ python3 scripts/local_demo.py --size 4 --demo tree_allreduce --mode teaching
 python3 scripts/verify.py            # 自动验收
 ```
 
-课堂演示数据约定：`Data Size = N` 表示每 rank 发送 **N 个 int32 元素**，
-单条算法消息 payload = N × 4 B（barrier 同步消息为 4 B 且不计入通信视图）。
+课堂演示数据约定：`Data Size = N` 表示每 rank 的向量 = **[学生初值] × N**（N 个 int32）。
+单条算法消息 payload = N × 4 B；大小显示自动转 KB/MB（如 64 B / 1 KB / 4 MB）。
+最终结果只显示**一个数**（向量每个元素相等，它就是归约/AllReduce 的结果），
+不在终端打印整条大向量。barrier 同步消息不计入通信视图。
 
 ## 4. 课堂演示主线
 

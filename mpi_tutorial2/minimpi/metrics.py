@@ -59,6 +59,17 @@ class EventLog:
         self.events = []
 
 
+def fmt_bytes(n):
+    """Human-readable size: 40 B, 1 KB, 4 MB, ..."""
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            if n == int(n):
+                return "%d %s" % (int(n), unit)
+            return "%.1f %s" % (n, unit)
+        n /= 1024.0
+
+
 def bandwidth_mbps(payload_bytes, transfer_seconds):
     if transfer_seconds <= 0:
         return 0.0

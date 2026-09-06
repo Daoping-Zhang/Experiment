@@ -21,8 +21,8 @@ sys.path.insert(0, __import__("os").path.dirname(__file__))
 sys.path.insert(0, __import__("os").path.join(
     __import__("os").path.dirname(__file__), ".."))
 
-EXPECTED = "[10,14,18,22]"
-EXPECTED_128 = "[128,132,136,140]"
+EXPECTED = "10"   # sum of bases 1+2+3+4 (repeated vector)
+EXPECTED_128 = "36"  # sum of bases 1..8
 
 _passed = []
 _failed = []
@@ -86,7 +86,7 @@ def scenario_p2p_tag_and_large():
 # ---------------------------------------------------------------------------
 from _proc import Runner  # noqa: E402
 
-FINALS_RE = re.compile(r"Rank (\d+) final = (\[[^\]]+\])")
+FINALS_RE = re.compile(r"Rank (\d+) final = (-?\d+)")
 
 
 def finals_from(log):
@@ -125,8 +125,8 @@ def main():
     scenario_imports()
     scenario_p2p_tag_and_large()
 
-    e2e("naive_reduce perf", "naive_reduce", "performance", "[10]",
-        expected_root="[10]")
+    e2e("naive_reduce perf", "naive_reduce", "performance", "10",
+        expected_root="10")
     e2e("naive_allreduce perf", "naive_allreduce", "performance", EXPECTED)
     e2e("tree_allreduce perf", "tree_allreduce", "performance", EXPECTED)
     e2e("ring_allreduce perf", "ring_allreduce", "performance", EXPECTED)
@@ -134,7 +134,7 @@ def main():
     e2e("tree_allreduce teaching", "tree_allreduce", "teaching", EXPECTED)
     e2e("ring_allreduce teaching", "ring_allreduce", "teaching", EXPECTED)
     e2e("naive_allreduce size8", "naive_allreduce", "performance",
-        "[36,44,52,60]", size=8)
+        "36", size=8)
     e2e("4MB payload naive_allreduce", "naive_allreduce", "performance",
         None, payload=4 * 1024 * 1024)
 

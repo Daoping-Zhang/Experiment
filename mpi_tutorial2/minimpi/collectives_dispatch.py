@@ -12,14 +12,27 @@ from . import protocol as P
 
 
 def make_value(params, rank=0):
-    """Build one rank's local value (deterministic, same everywhere)."""
+    """Build one rank's local value.
+
+    Data-size mode (vector_len/data_size > 0):
+        value = [base] * N   where base = params["values"][rank] (the
+        student-typed initial value). Every element is equal, so the reduced
+        result is just the SUM of the students' base values, repeated.
+    Legacy scalar mode (ping-pong etc.): a one-element list.
+    payload mode (benchmark): raw bytes.
+    """
     if params.get("payload"):
         n = int(params["payload"])
         seed = bytes((i * 31 + 7) & 0xFF for i in range(min(n, 4096)))
         return (seed * (n // len(seed) + 1))[:n] if n else b""
-    if params.get("vector_len"):
-        seed = params.get("seed", 1)
-        return [seed + rank + j for j in range(int(params["vector_len"]))]
+    vl = int(params.get("vector_len") or params.get("data_size") or 0)
+    if vl > 0:
+        values = params.get("values") or {}
+        base = values.get(str(rank), values.get(rank, rank + 1))
+        base = int(base)
+        if params.get("fmt", P.FMT_INT32) == P.FMT_FLOAT64:
+            return [float(base)] * vl
+        return [base] * vl
     if params.get("fmt", P.FMT_INT32) == P.FMT_FLOAT64:
         return [float(params.get("n_value", 1))]
     return [int(params.get("n_value", 7))]

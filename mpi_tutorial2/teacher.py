@@ -29,7 +29,7 @@ from minimpi import protocol as P, collectives_dispatch  # noqa: E402
 from minimpi import barrier as BarrierMod                # noqa: E402
 from minimpi.transport import PeerTransport             # noqa: E402
 from minimpi.communicator import Communicator           # noqa: E402
-from minimpi.metrics import EventLog                    # noqa: E402
+from minimpi.metrics import EventLog, fmt_bytes              # noqa: E402
 
 
 def detect_ip():
@@ -95,15 +95,17 @@ class Aggregator:
 
 
 class Coordinator:
-    def __init__(self, size, host, port, advertise, auto=False):
+    def __init__(self, size, host, port, advertise, auto=False, value0=1):
         self.size = size
         self.host = host
         self.port = port
         self.advertise = advertise or (host if host != "0.0.0.0" else detect_ip())
         self.auto = auto
+        self.value0 = value0          # Teacher (rank 0) initial value
 
         self.workers = {}            # rank -> control socket
         self.names = {0: "Teacher"}  # rank -> human-readable name
+        self.bases = {}              # rank -> student initial value
         self.peers = {0: {"host": self.advertise, "port": None}}
         self.lock = threading.Lock()
         self.next_rank = 1
@@ -146,6 +148,7 @@ class Coordinator:
                 self.next_rank += 1
                 self.workers[rank] = conn
                 self.names[rank] = msg.get("name") or ("Student %d" % rank)
+                self.bases[rank] = int(msg["value"]) if msg.get("value") is not None else (rank + 1)
                 self.peers[rank] = {"host": msg["host"], "port": int(msg["port"])}
             welcome = {"t": P.C_WELCOME, "rank": rank, "size": self.size,
                        "peers": self.peers}
@@ -241,6 +244,9 @@ class Coordinator:
         agg.reset()
         params = dict(params, mode=mode, size=self.size)
         params["peers"] = self.peers
+        values = {r: self.bases.get(r, r + 1) for r in range(self.size)}
+        values[0] = self.value0
+        params["values"] = {str(r): v for r, v in values.items()}
 
         print("\nRunning...")
         self.send_to_workers({"t": P.C_RUN, "params": params})
@@ -289,9 +295,9 @@ class Coordinator:
                 continue
             seen.add(key)
             dt = e.get("transfer_time_ms", 0)
-            print("%s -> %s    %d B   %.3f ms" %
+            print("%s -> %s    %s   %.3f ms" %
                   (self.name_of(src), self.name_of(dst),
-                   e.get("payload_bytes", 0), dt))
+                   fmt_bytes(e.get("payload_bytes", 0)), dt))
 
     def shutdown(self):
         self.closed = True
@@ -343,8 +349,10 @@ def _params_for(algo, mode, payload=0, vector_len=0):
 
 
 def _fmt_value(v):
+    """Show ONE number (the vector is [base]*N, so element 0 carries the
+    result). Avoids printing thousands of elements on the terminal."""
     if isinstance(v, list):
-        return "[" + ",".join(str(x) for x in v) + "]"
+        return "%d" % v[0] if len(v) else "[]"
     return str(v)
 
 
@@ -367,11 +375,11 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True):
     params = _params_for(algo, mode, payload=payload, vector_len=vector_len)
     print("\n== Demo: %s  mode=%s ==" % (algo, mode))
     if payload:
-        print("payload: %d bytes (op=xor, fmt=raw)" % payload)
+        print("payload: %s per message (op=xor, fmt=raw)" % fmt_bytes(payload))
     else:
         params["data_size"] = vector_len
-        print("data size: %d elements  (int32 -> payload %d B per element "
-              "exchange)" % (vector_len, vector_len * P.ELEMENT_BYTES))
+        print("data size: %d elements  (int32 -> %s per message)"
+              % (vector_len, fmt_bytes(vector_len * P.ELEMENT_BYTES)))
     t0 = time.time()
     agg = coord.run_demo(params, mode)
     dt = time.time() - t0
@@ -379,6 +387,9 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True):
         print("\nCollective complete.  Total wall time: %.3f s" % dt)
         for r in sorted(agg.results):
             print("  Rank %d final = %s" % (r, _fmt_value(agg.results[r])))
+        if algo in ("naive_reduce", "tree_reduce"):
+            print("\n(note) %s: only Rank 0 (root) received the reduced result; "
+                  "other ranks keep their own local values." % algo)
     if agg and agg.errors:
         print("Errors:", agg.errors)
     return agg
@@ -437,6 +448,8 @@ def main():
     ap.add_argument("--payload", type=int, default=0)
     ap.add_argument("--data-size", type=int, default=0,
                     help="elements per rank (i32); menu default 16")
+    ap.add_argument("--value", type=int, default=1,
+                    help="Teacher (rank 0) initial value")
     ap.add_argument("--benchmark", action="store_true")
     args = ap.parse_args()
 
@@ -446,7 +459,7 @@ def main():
     print("========================================\nMiniMPI Classroom\n"
           "========================================")
     coord = Coordinator(args.size, args.host, args.port, args.advertise,
-                        auto=args.auto)
+                        auto=args.auto, value0=args.value)
     print("Coordinator: %s:%d" % (coord.advertise, coord.port))
     print("Rank 0: Teacher (advertised %s:%d)" % (coord.advertise,
                                                   coord.transport.port))
