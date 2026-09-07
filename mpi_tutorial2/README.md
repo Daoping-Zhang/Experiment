@@ -30,6 +30,36 @@ MPI_Send(&value, 1, MPI_INT, 1, 0, MPI_COMM_WORLD);   /* Tutorial 1 视角 */
 ```
 （collective 匹配用独立 tag；teaching 同步消息用 `CTRL_TAG_BASE` 起，见 `minimpi/protocol.py`。）
 
+## 1.5 学生只需看三处核心代码
+
+**① 初始化 / 生命周期**（真实 MPI 习惯，`minimpi/mpi.py` + `collectives_dispatch.run`）：
+```python
+MPI.Init()                      # demo 开始
+comm = MPI.COMM_WORLD           # 得到本进程的 communicator
+rank = comm.Get_rank(); size = comm.Get_size()
+total = comm.allreduce(value, op=MPI.SUM)
+MPI.Finalize()                  # demo 结束
+```
+
+**② 同步点**（`comm.sync_round(r)`，在 `collectives/*.py` 每轮结束处可见）：
+Teaching 模式 = 人人进入一个数据面 allreduce-of-1 barrier，rank0 打印该轮并等 ENTER；
+Performance 模式 = 空操作。算法本身从不分支。
+
+**③ 集合通信算法**：`collectives/naive_reduce.py` 等，每个文件就是整套算法，
+只出现 `comm.send / comm.recv / combine`。
+
+### MPI ↔ MiniMPI API 对照
+| 标准 MPI | MiniMPI（本仓库） |
+|---|---|
+| `MPI_Init` / `MPI_Finalize` | `MPI.Init()` / `MPI.Finalize()` |
+| `MPI_COMM_WORLD` | `MPI.COMM_WORLD` |
+| `MPI_Comm_rank/size` | `comm.Get_rank()/Get_size()` |
+| `MPI_Send(buf,cnt,type,dest,tag,comm)` | `comm.send(value, dest, tag)` |
+| `MPI_Recv(...,source,tag,comm,&st)` | `value = comm.recv(source, tag)` |
+| `MPI_Reduce(...,MPI_SUM,root,comm)` | `comm.reduce(value, op, root)` |
+| `MPI_Allreduce(...,MPI_SUM,comm)` | `comm.allreduce(value, op)` |
+| 教学扩展 | `comm.naive_*/tree_*/ring_*` |
+
 ## 1.5 课堂阅读路径
 
 学生主要阅读：

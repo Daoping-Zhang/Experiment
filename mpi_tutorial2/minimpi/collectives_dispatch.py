@@ -50,10 +50,28 @@ def _load_module(algo):
 
 
 def run(rt, params):
-    value = make_value(params, rank=rt.rank)
-    fmt = params.get("fmt", P.FMT_INT32)
-    op = params.get("op", "sum")
-    algo = params["algorithm"]
+    """Run one collective through the MPI-compatible front-end (mpi.py).
 
-    fn = getattr(_load_module(algo), algo)
-    return fn(rt, value, op, fmt) if algo != "ping_pong" else fn(rt, value)
+    Lifecycle mirrors MPI:
+        MPI.Init() -> comm = MPI.COMM_WORLD -> comm.allreduce(...) -> MPI.Finalize()
+    Both the teacher's rank 0 and every student worker execute this exact
+    path, so teacher/worker behavior is identical by construction.
+    """
+    from . import mpi as M
+
+    M.Init()
+    try:
+        value = make_value(params, rank=rt.rank)
+        comm = M.World(rt)
+        comm.configure(algorithm=params["algorithm"],
+                       fmt=params.get("fmt", P.FMT_INT32))
+        M.COMM_WORLD = comm
+
+        fn = getattr(_load_module(params["algorithm"]), params["algorithm"])
+        if params["algorithm"] == "ping_pong":
+            result = fn(comm, value)
+        else:
+            result = fn(comm, value, params.get("op", "sum"))
+        return result
+    finally:
+        M.Finalize()

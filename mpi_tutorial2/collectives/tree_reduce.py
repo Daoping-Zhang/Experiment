@@ -1,4 +1,4 @@
-"""tree_reduce.py — binomial-tree reduce to root (parallel log(P) rounds).
+"""tree_reduce.py — STUDENT-FACING: Binomial-Tree Reduce (log2(P) rounds).
 
 For P = 8 the pattern is:
 
@@ -6,49 +6,46 @@ For P = 8 the pattern is:
     Round 2:  2->0  6->4
     Round 3:  4->0
 
-A rank sends exactly once (on the round of its lowest set bit), then becomes
-inactive; the receiving rank reduces the message into its local value.
+A rank sends exactly ONCE (on the round of its lowest set bit) and then goes
+inactive; the receiving parent combines the message into its local value.
+Fewer steps than naive reduce -> less root hotspot (but harder to write).
 
-Requires a power-of-two world size (checked with a clear error).
+Requires a power-of-two world size (clear error otherwise).
 """
 from minimpi.communicator import combine
 
 TAG = 301
 
 
-def _is_pow2(n):
+def _pow2(n):
     return n >= 1 and (n & (n - 1)) == 0
 
 
-def tree_reduce(rt, value, op="sum", fmt="i32", root=0):
-    comm = rt.comm
-    P = comm.size
-    if not _is_pow2(P):
+def tree_reduce(comm, value, op="sum", root=0):
+    P = comm.Get_size()
+    if not _pow2(P):
         raise ValueError("tree_reduce requires a power-of-two world size, got %d" % P)
     if root != 0:
-        raise ValueError("tree_reduce first version supports root == 0 only")
+        raise ValueError("tree_reduce (first version) supports root == 0 only")
 
-    # force the root's value into position 0 by index arithmetic below; with
-    # root == 0 the tree is plain: partner = rank ^ (1 << k), smaller wins.
-    R = P.bit_length() - 1
-    rank = comm.rank
-    local = value
+    rank = comm.Get_rank()
+    local = value if isinstance(value, (bytes, bytearray)) else list(value)
     active = True
 
-    for k in range(R):
+    for k in range(P.bit_length() - 1):      # log2(P) rounds
         rnd = k + 1
-        low = (rank & ((1 << k) - 1)) == 0
-        bit_set = (rank >> k) & 1 == 1
-        if active and bit_set and low:
-            # this is the round of this rank's lowest set bit -> send once
-            partner = rank ^ (1 << k)
-            comm.send(local, dest=partner, tag=TAG, fmt=fmt, algo="tree_reduce",
-                      phase="reduce", rnd=rnd)
-            active = False
-        elif active and not bit_set and low and (rank + (1 << k)) < P:
-            partner = rank + (1 << k)
-            v = comm.recv(source=partner, tag=TAG, fmt=fmt, algo="tree_reduce",
-                          phase="reduce", rnd=rnd)
-            local = combine(local, v, op, fmt)
-        rt.sync_round(rnd)
+        bit = 1 << k
+        low_bits_clear = (rank & (bit - 1)) == 0
+        is_sender = ((rank >> k) & 1) == 1
+
+        comm.begin_round(rnd, "reduce")
+        if active and is_sender and low_bits_clear:
+            parent = rank ^ bit                 # clear bit k -> smaller rank
+            comm.send(local, dest=parent, tag=TAG)
+            active = False                     # sent once, becomes inactive
+        elif active and not is_sender and low_bits_clear and (rank + bit) < P:
+            child = rank + bit
+            received = comm.recv(source=child, tag=TAG)
+            local = combine(local, received, op, comm.fmt)
+        comm.sync_round(rnd)
     return local

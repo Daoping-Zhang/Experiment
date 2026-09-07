@@ -1,30 +1,29 @@
-"""naive_reduce.py — all-to-one reduce to root (Rank 0 is the hotspot).
+"""naive_reduce.py — STUDENT-FACING: All-to-One Reduce to the root.
 
-    Rank 1 -----------\
-    Rank 2 ------------\
-    Rank 3 -------------> Rank 0 (root)
-    ...
+Read this file top to bottom: it is the whole algorithm.
 
-One logical round: every non-root rank sends its local value to the root;
-the root receives all of them and combines (default op: SUM).
+    every rank that is not the root   ->   send(value, dest=root)
+    root (rank 0)                     ->   recv() from everyone, combine (SUM)
+
+Pattern to learn:
+    Everyone -> Root     (root becomes a communication hotspot)
 """
 from minimpi.communicator import ANY_SOURCE, combine
 
 TAG = 101
 
 
-def naive_reduce(rt, value, op="sum", fmt="i32", root=0):
-    comm = rt.comm
+def naive_reduce(comm, value, op="sum", root=0):
     rnd = 1
-    if comm.rank == root:
-        acc = list(value) if fmt != "raw" else value
-        for _ in range(1, comm.size):
-            v = comm.recv(source=ANY_SOURCE, tag=TAG, fmt=fmt,
-                          algo="naive_reduce", phase="all-to-one", rnd=rnd)
-            acc = combine(acc, v, op, fmt)
-        rt.sync_round(rnd)
+    if comm.Get_rank() == root:
+        acc = value if isinstance(value, (bytes, bytearray)) else list(value)
+        comm.begin_round(rnd, "all-to-one")
+        for _ in range(1, comm.Get_size()):
+            received = comm.recv(source=ANY_SOURCE, tag=TAG)
+            acc = combine(acc, received, op, comm.fmt)   # local reduce
+        comm.sync_round(rnd)
         return acc
-    comm.send(value, dest=root, tag=TAG, fmt=fmt, algo="naive_reduce",
-              phase="all-to-one", rnd=rnd)
-    rt.sync_round(rnd)
+    comm.begin_round(rnd, "all-to-one")
+    comm.send(value, dest=root, tag=TAG)
+    comm.sync_round(rnd)
     return value

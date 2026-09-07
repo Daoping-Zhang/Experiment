@@ -1,58 +1,50 @@
-"""ring_allreduce.py — real ring allreduce: Reduce-Scatter + AllGather.
+"""ring_allreduce.py — STUDENT-FACING: Reduce-Scatter + AllGather.
 
-NOT "the whole vector travels around the ring once". The vector is split
-into `size` chunks; every round each rank sends one chunk to its next
-neighbour and receives one from its previous neighbour:
+Real ring allreduce, NOT "the whole vector travels around once":
 
-    next = (rank + 1) % size
-    prev = (rank - 1 + size) % size
+    Phase 1 reduce-scatter (P-1 rounds): split into P chunks; every round each
+        rank sends one chunk to next and receives one from prev, combining.
+        Afterwards rank r holds the fully reduced chunk (r+1) % P.
+    Phase 2 allgather (P-1 rounds): those reduced chunks rotate around the
+        ring until every rank has all of them.
 
-Phase 1 reduce-scatter (size-1 rounds): chunk partials combine as they travel
-around the ring; afterwards rank r holds the fully reduced chunk (r+1)%size.
-Phase 2 allgather (size-1 rounds): the reduced chunks rotate around the ring
-until every rank has all of them.
+    next = (rank + 1) % P ;  prev = (rank - 1 + P) % P
 
-Limitation (documented in README): payload element/byte count must be
-divisible by world size.
+Limitation (see README): vector length must be divisible by world size.
 """
 from minimpi.communicator import combine
 
 TAG = 501
 
 
-def ring_allreduce(rt, value, op="sum", fmt="i32"):
-    comm = rt.comm
-    P = comm.size
-    rank = comm.rank
+def ring_allreduce(comm, value, op="sum", root=0):
+    P = comm.Get_size()
+    rank = comm.Get_rank()
     if P < 2:
         return value
 
-    if fmt == "i32":
-        n = len(value)
-    else:
-        n = len(bytes(value))
-    if n % P != 0:
+    n = len(value)
+    if n % P:
         raise ValueError("ring_allreduce requires payload length divisible by "
                          "world size (%d %% %d != 0)" % (n, P))
 
-    chunk = n // P
-    chunks = [value[i * chunk:(i + 1) * chunk] for i in range(P)]
+    chunk_len = n // P
+    chunks = [value[i * chunk_len:(i + 1) * chunk_len] for i in range(P)]
     nxt = (rank + 1) % P
     prv = (rank - 1 + P) % P
 
-    # ---- Phase 1: reduce-scatter (rounds 1..P-1) --------------------------
+    # ---- Phase 1: reduce-scatter -----------------------------------------
     for step in range(P - 1):
         rnd = step + 1
         send_idx = (rank - step) % P
         recv_idx = (send_idx - 1) % P
-        comm.send(chunks[send_idx], dest=nxt, tag=TAG, fmt=fmt,
-                  algo="ring_allreduce", phase="reduce-scatter", rnd=rnd)
-        got = comm.recv(source=prv, tag=TAG, fmt=fmt, algo="ring_allreduce",
-                        phase="reduce-scatter", rnd=rnd)
-        chunks[recv_idx] = combine(chunks[recv_idx], got, op, fmt)
-        rt.sync_round(rnd)
+        comm.begin_round(rnd, "reduce-scatter")
+        comm.send(chunks[send_idx], dest=nxt, tag=TAG)
+        got = comm.recv(source=prv, tag=TAG)
+        chunks[recv_idx] = combine(chunks[recv_idx], got, op, comm.fmt)
+        comm.sync_round(rnd)
 
-    # ---- Phase 2: allgather (rounds P..2P-2) ------------------------------
+    # ---- Phase 2: allgather ----------------------------------------------
     owned = (rank + 1) % P
     final = [None] * P
     final[owned] = chunks[owned]
@@ -60,20 +52,19 @@ def ring_allreduce(rt, value, op="sum", fmt="i32"):
     cur_idx = owned
     for step in range(P - 1):
         rnd = P + step
-        comm.send(cur, dest=nxt, tag=TAG, fmt=fmt,
-                  algo="ring_allreduce", phase="allgather", rnd=rnd)
-        cur = comm.recv(source=prv, tag=TAG, fmt=fmt,
-                        algo="ring_allreduce", phase="allgather", rnd=rnd)
+        comm.begin_round(rnd, "allgather")
+        comm.send(cur, dest=nxt, tag=TAG)
+        cur = comm.recv(source=prv, tag=TAG)
         cur_idx = (cur_idx - 1) % P
         final[cur_idx] = cur
-        rt.sync_round(rnd)
+        comm.sync_round(rnd)
 
-    if fmt == "i32":
-        out = []
+    if isinstance(value, (bytes, bytearray)):
+        out = bytearray()
         for c in final:
             out.extend(c)
-        return out
-    b = bytearray()
+        return bytes(out)
+    out = []
     for c in final:
-        b.extend(c)
-    return bytes(b)
+        out.extend(c)
+    return out
