@@ -98,7 +98,8 @@ class World:
     """MPI-like communicator facade around one rank's runtime.
 
     All communication still goes through the runtime's transport; this class
-    only gives it standard-MPI names and readable default metadata.
+    only gives it standard-MPI names, readable default metadata and the two
+    teaching timings (My Send Completion / local Round Finished).
     """
 
     def __init__(self, rt):
@@ -110,6 +111,9 @@ class World:
         # current logical round / phase used to tag every send/recv event
         self._rnd = 0
         self._phase = ""
+        # per-round teaching timings (relative to THIS rank's round start)
+        self._round_start = 0.0
+        self._send_finish = None
 
     def configure(self, algorithm="", fmt="i32"):
         """Set metadata used to tag this demo's communication events."""
@@ -126,9 +130,12 @@ class World:
     # -- point-to-point (MPI-style) ---------------------------------------
     def send(self, value, dest, tag=0):
         """Blocking send (like MPI_Send). Returns bytes sent."""
-        return self._rt.comm.send(value, dest, tag=tag, fmt=self.fmt,
-                                  algo=self.algorithm, phase=self._phase,
-                                  rnd=self._rnd)
+        from .metrics import now_ns
+        n = self._rt.comm.send(value, dest, tag=tag, fmt=self.fmt,
+                               algo=self.algorithm, phase=self._phase,
+                               rnd=self._rnd)
+        self._send_finish = now_ns()      # My Send Completion (algorithm sends)
+        return n
 
     def recv(self, source=ANY_SOURCE, tag=ANY_TAG, timeout=None):
         """Blocking receive matched by (source, tag)."""
@@ -139,8 +146,40 @@ class World:
     # -- sync point (teaching) --------------------------------------------
     def begin_round(self, rnd, phase=""):
         """Mark the start of a logical round (labels events; see README)."""
+        from .metrics import now_ns
         self._rnd = rnd
         self._phase = phase
+        self._round_start = now_ns()
+        self._send_finish = None
+
+    # -- timing (teaching) ------------------------------------------------
+    def send_finished_at_ms(self):
+        """My Send Completion: from round start to this rank's last algorithm
+        send completion in this round. None if this rank sent nothing."""
+        if self._send_finish is None:
+            return None
+        return (self._send_finish - self._round_start) / 1e6
+
+    def snapshot_ms(self):
+        """(send_ms, work_ms) relative to this rank's round start; work_ms is
+        measured now, i.e. when the rank finished its own algorithm work
+        (before any teaching barrier / teacher pause)."""
+        from .metrics import now_ns
+        now = now_ns()
+        send_ms = self.send_finished_at_ms()
+        work_ms = (now - self._round_start) / 1e6
+        return send_ms, work_ms
+
+    def Barrier(self):
+        """Start-of-RUN barrier (both modes). Allreduce-of-1 internally —
+        a MiniMPI teaching implementation of a barrier, not real-MPI's
+        barrier algorithm."""
+        from . import barrier as B
+        B.barrier(self._rt.comm, 0)   # tag = BARRIER_TAG_BASE + 0
+        if self.rank == 0:
+            cb = getattr(self._rt, "on_start_barrier_done", None)
+            if cb is not None:
+                cb()
 
     def sync_round(self, rnd):
         """End of logical round rnd.

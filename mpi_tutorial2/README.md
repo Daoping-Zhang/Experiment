@@ -78,6 +78,40 @@ teacher.py  worker.py  minimpi/  scripts/  tests/
 学生终端看到的是 **MPI 通信视角**（Round / SEND / RECV / Peer / Payload），
 不会暴露 socket / protocol / thread / transport 细节。
 
+## 1.7 Round、Start Barrier 与 Timing（Round-Based Refactor）
+
+**RUN spec（只含三个核心字段）**
+```python
+run = {"algorithm": "tree_allreduce", "data_size": 1024, "mode": "teaching"}
+```
+
+**每次 RUN 的统一流程**
+```text
+输入一个整数 → [value] × data_size
+        ↓
+comm.Barrier()          # Start Barrier：两种 Mode 都有（公平起点/统一起点）
+        ↓
+collective（同一份算法文件）
+```
+
+**Data Size 语义（全项目统一）**：`Data Size = N` → 每 rank 本地向量 `[value] × N`（int32 约 N×4 B）。Ring 每条消息只发 chunk（N/P），展示的是该消息真实 `payload_bytes`。
+
+**两种 Mode 用完全相同的算法**：`collectives/*.py` 只有一份实现；差异只在
+`comm.sync_round(rnd)` —— Teaching=round barrier（数据面 allreduce-of-1，属于
+MiniMPI 教学实现，不代表真实 MPI barrier 算法），Performance=no-op。
+
+**Tag 分离**：`ALGO_TAG_BASE=1000`（算法 payload）与 `BARRIER_TAG_BASE=7000`
+（同步消息）互不匹配；classroom 控制（RUN/DONE/SHUTDOWN）走独立 control
+channel，不是 MPI message、没有 tag。
+
+**Timing（本轮唯一教学指标）**
+- `My Send Finished At`：本 rank 本轮最后一次算法 send 完成时刻相对本轮开始（无 send 显示 `N/A`，不伪造）。
+- `Round Finished At`：teacher 时钟上"所有 rank 完成本轮"（round barrier gather 完成）相对上一轮 release / Start Barrier 的时间。teacher ENTER/讲解属于教学暂停，发生在 gather 之后、release 之前，**不计入** round time（有测试验证）。
+- `Waiting After My Send` ≈ 本轮结束(自身工作) − My Send Finished。
+
+**性能实验**：Performance Mode 不打印/不上传每轮教学事件；只测 Collective Wall Time。
+不预设 Tree/Ring 谁赢（Python/TCP/拓扑/机器相关，结果来自真实测量）。
+
 ## 2. 目录
 
 ```

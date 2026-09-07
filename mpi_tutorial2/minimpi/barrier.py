@@ -14,12 +14,22 @@ comm.send/comm.recv primitives as every collective.
 """
 from . import protocol as P
 
-BASE_TAG = 7000   # control-plane sync tags (CTRL_TAG_BASE + rnd)
+BASE_TAG = P.BARRIER_TAG_BASE   # barrier tag = BARRIER_TAG_BASE + rnd
 
 
-def barrier(comm, rnd, on_root_ready=None):
-    """Blocking round barrier. `on_root_ready(rnd)` runs on rank 0 between
-    the gather and the broadcast legs (that is where the teacher pauses)."""
+def barrier(comm, rnd, on_root_ready=None, on_root_gathered=None):
+    """Blocking data-plane barrier (allreduce-of-1, MiniMPI teaching impl).
+
+    non-root: send([1] -> root)  then  recv([1] <- root)
+    root:     recv [1] from every rank
+                  -> on_root_gathered(rnd)   (all ranks finished this round)
+                  -> on_root_ready(rnd)      (teacher display / ENTER pause)
+              send([1] -> every rank)
+
+    Teaching pauses between on_root_gathered and on_root_ready; that pause is
+    AFTER the gather time, so it never enters round timing. Performance mode
+    never calls this barrier.
+    """
     root = 0
     tag = BASE_TAG + rnd
     if comm.rank == root:
@@ -27,6 +37,8 @@ def barrier(comm, rnd, on_root_ready=None):
             comm.recv(source=P.ANY_SOURCE, tag=tag, fmt="i32",
                       algo="teaching-barrier", phase="sync-wait", rnd=rnd,
                       kind=P.KIND_BARRIER)
+        if on_root_gathered is not None:
+            on_root_gathered(rnd)
         if on_root_ready is not None:
             on_root_ready(rnd)
         for dst in range(1, comm.size):

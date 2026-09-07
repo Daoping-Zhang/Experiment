@@ -48,7 +48,9 @@ def run_demo(rt, control, params):
         rt.show_ui = True
         rt._report = lambda rnd, evs: control.send(
             {"t": P.C_ROUND_DONE, "rnd": rnd,
-             "events": [e.to_dict() for e in evs]})
+             "events": [e.to_dict() for e in evs],
+             "send_ms": rt._snap[0] if getattr(rt, "_snap", None) else None,
+             "work_ms": rt._snap[1] if getattr(rt, "_snap", None) else None})
         rt._barrier = lambda rnd: BarrierMod.barrier(rt.comm, rnd)
         rt._on_round = lambda rnd: _show_round(rt, rnd)
     else:
@@ -83,6 +85,9 @@ def _encode(value):
 def _read_one_int(rt):
     """Each student types one integer per RUN; vector = [n] * data_size.
     Headless (non-tty) fallback: rank + 1 so automation stays deterministic."""
+    import os as _os, time as _time
+    if _os.environ.get("MINIMPI_INPUT_DELAY"):
+        _time.sleep(float(_os.environ["MINIMPI_INPUT_DELAY"]))
     if sys.stdin.isatty():
         try:
             line = input("Input one integer:\n> ").strip()
@@ -109,7 +114,16 @@ def _show_round(rt, rnd):
         else:
             print("  Receive:\n  Rank %d <- Rank %d\n  %s" %
                   (rt.rank, e.source, fmt_bytes(e.payload_bytes)))
-    print("  (waiting for next round...)")
+    send_ms, work_ms = rt.comm_world.snapshot_ms()
+    rt._snap = (send_ms, work_ms)
+    send_txt = "N/A" if send_ms is None else "%.2f ms" % send_ms
+    print("\nMy Send Finished At: %s" % send_txt)
+    if send_ms is not None and work_ms is not None:
+        print("Round Work Finished At: %.2f ms" % work_ms)
+        print("Waiting After My Send: %.2f ms" % max(0.0, work_ms - send_ms))
+    else:
+        print("Round Work Finished At: %.2f ms" % (work_ms or 0.0))
+    print("\nWaiting for other ranks...")
 
 
 class WorkerShell:

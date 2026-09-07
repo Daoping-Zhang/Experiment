@@ -75,6 +75,8 @@ def run(rt, params, value=None):
     else:
         value = make_value(params, rank=rt.rank)
 
+    comm.Barrier()   # Start Barrier: everyone ready, then the collective runs
+
     fn = getattr(_load_module(params["algorithm"]), params["algorithm"])
     if params["algorithm"] == "ping_pong":
         return fn(comm, value)

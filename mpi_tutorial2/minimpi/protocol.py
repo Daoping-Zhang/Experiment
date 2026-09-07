@@ -19,21 +19,22 @@ import threading
 ANY_SOURCE = -1
 ANY_TAG = -1
 
-# The teaching story maps the two trailing MPI arguments straight onto the
-# two planes:
-#   tag  -> which CHANNEL this message uses:
-#             TAG_DATA    (0) = data-plane payload      (collective payloads)
-#             TAG_CONTROL (1) = control-plane / sync    (teaching sync)
-#   comm -> WHICH GROUP the message belongs to. MPI_COMM_WORLD is the
-#           membership table the teacher's CONTROL plane built during
-#           registration (rank, size, peer endpoints); you pass it to every
-#           send/recv to say "within this world".
-# Algorithm-phase-rounds use distinct tags above TAG_CONTROL for MPI-style
-# message matching; sync/barrier messages live in CTRL_TAG_BASE.. (control
-# plane over the data channel).
+# tag meanings inside the MiniMPI DATA plane (all via comm.send/comm.recv):
+#   ALGO_TAG_BASE   : collective payloads (each algorithm module picks its
+#                     own tag; barrier messages live far away, so an
+#                     algorithm message can never match a barrier recv and
+#                     vice versa)
+#   BARRIER_TAG_BASE: teaching sync / start-barrier messages. A barrier is
+#                     implemented as an allreduce-of-1 — that is a MiniMPI
+#                     TEACHING implementation, NOT a statement about real MPI
+#                     (production MPI may use dedicated barrier algorithms).
+# Classroom control (RUN / DONE / SHUTDOWN) is NOT an MPI message and has no
+# MPI tag — it travels over its own control channel.
+ALGO_TAG_BASE = 1000
+BARRIER_TAG_BASE = 7000
+
 TAG_DATA = 0
-TAG_CONTROL = 1
-CTRL_TAG_BASE = 7000       # teaching barrier / sync tags (control plane)
+TAG_BARRIER = 1            # reserved barrier designator (actual tag: base+round)
 
 # Event / message classification: what a message is FOR.
 KIND_ALGO = "algorithm"    # real collective payload communication

@@ -29,7 +29,7 @@ from minimpi import protocol as P, collectives_dispatch  # noqa: E402
 from minimpi import barrier as BarrierMod                # noqa: E402
 from minimpi.transport import PeerTransport             # noqa: E402
 from minimpi.communicator import Communicator           # noqa: E402
-from minimpi.metrics import EventLog, fmt_bytes              # noqa: E402
+from minimpi.metrics import EventLog, fmt_bytes, now_ns      # noqa: E402
 
 
 def detect_ip():
@@ -56,12 +56,16 @@ class Aggregator:
         self.done = set()           # ranks that finished
         self.results = {}           # rank -> final value
         self.errors = {}            # rank -> error string
+        self.timing = {}            # rnd -> {rank: {"send": ms, "work": ms}}
         self.active = False
 
-    def worker_round_done(self, rank, rnd, events):
+    def worker_round_done(self, rank, rnd, events, send_ms=None, work_ms=None):
         with self.cv:
             self.round_reports.setdefault(rnd, set()).add(rank)
             self.round_events.setdefault(rnd, []).extend(events)
+            if send_ms is not None:
+                self.timing.setdefault(rnd, {})[rank] = {"send": send_ms,
+                                                         "work": work_ms}
             self.cv.notify_all()
 
     def worker_done(self, rank, value=None, error=None):
@@ -108,6 +112,7 @@ class Coordinator:
         self.next_rank = 1
         self.closed = False
         self.agg = None
+        self._timing = {"start": None, "gather": {}, "release": {}}
 
         self.transport = PeerTransport("teacher", bind_host=self.host)
         self.peers[0]["port"] = self.transport.port
@@ -168,7 +173,9 @@ class Coordinator:
                 self._check_ok.setdefault(rank, set(m.get("pass", [])))
                 self._check_fail.setdefault(rank, set(m.get("fail", [])))
         elif t == P.C_ROUND_DONE and agg:
-            agg.worker_round_done(rank, int(m["rnd"]), m.get("events", []))
+            agg.worker_round_done(rank, int(m["rnd"]), m.get("events", []),
+                                  send_ms=m.get("send_ms"),
+                                  work_ms=m.get("work_ms"))
         elif t == P.C_DONE and agg:
             val = m.get("final")
             if isinstance(val, dict) and "vec" in val:
@@ -267,18 +274,45 @@ class Coordinator:
         threading.Thread(target=work, daemon=True).start()
 
     def on_round_ready(self, agg, rnd):
-        """Rank-0 barrier leg: show the global view of round rnd, then let the
-        class proceed. Runs on the teacher's rank-0 thread."""
+        """Rank-0 barrier leg: show the global view of round rnd + timing,
+        then let the class proceed (ENTER). The gather time is already fixed
+        before this pause, so ENTER never enters round timing."""
         agg.wait_round_events(rnd, need=self.size - 1, timeout=30)
-        # teaching-barrier traffic is classified kind="barrier" and hidden;
-        # the global view shows only the collective's real communication.
+        # teaching-barrier traffic is kind="barrier" and hidden; only the
+        # collective's real algorithm communication is shown.
         remote = [e for e in agg.round_events.get(rnd, [])
                   if e.get("kind") != "barrier"]
         local = [e.to_dict() for e in self.events0.by_round(rnd)
                  if e.kind != "barrier"]
         self._print_round(rnd, remote + local)
+
+        # ---- Timing (Audit 7/8/10) ------------------------------------
+        print("\nTiming")
+        timing = agg.timing.get(rnd, {})
+        # Rank 0 (teacher) timings from its own World snapshot
+        if self.rank0.comm_world is not None:
+            send0, work0 = self.rank0.comm_world.snapshot_ms()
+            timing.setdefault(0, {"send": send0, "work": work0})
+        for rk in range(self.size):
+            t = timing.get(rk)
+            send = None if t is None else t.get("send")
+            work = None if t is None else t.get("work")
+            send_txt = "N/A" if send is None else "%.2f ms" % send
+            work_txt = "N/A" if work is None else "%.2f ms" % work
+            print("  Rank %d send finished %s   (round work %s)"
+                  % (rk, send_txt, work_txt))
+        rms = self.round_ms(rnd)
+        print("Round Finished At: %s" %
+              ("%.2f ms" % rms if rms is not None else "N/A"))
+        print("\nAll ranks completed Round %d." % rnd)
+
+        import os as _os, time as _time
         if not self.auto:
             input("\nPress ENTER for next round.")
+        elif _os.environ.get("MINIMPI_TEACH_PAUSE"):
+            _time.sleep(float(_os.environ["MINIMPI_TEACH_PAUSE"]))
+        # gather time was fixed BEFORE the pause, so round timing excludes it
+        self.record_release(rnd)   # baseline for the NEXT round (after pause)
 
     def _print_round(self, rnd, events):
         print("\n--------------- Round %d ----------------" % rnd)
@@ -292,6 +326,26 @@ class Coordinator:
             dt = e.get("transfer_time_ms", 0)
             print("Rank %d -> Rank %d    %s   %.3f ms" %
                   (src, dst, fmt_bytes(e.get("payload_bytes", 0)), dt))
+
+    # ---- round timing (teacher clock; teaching pauses excluded) ---------
+    def record_start(self):
+        self._timing["start"] = now_ns()
+
+    def record_gather(self, rnd):
+        self._timing["gather"][rnd] = now_ns()
+
+    def record_release(self, rnd):
+        self._timing["release"][rnd] = now_ns()
+
+    def round_ms(self, rnd):
+        g = self._timing["gather"].get(rnd)
+        if g is None:
+            return None
+        base = self._timing["release"].get(rnd - 1,
+                                            self._timing["start"])
+        if base is None:
+            return None
+        return (g - base) / 1e6
 
     def shutdown(self):
         self.closed = True
@@ -315,6 +369,7 @@ class _Rank0Rt:
         self.size = coord.size
         self.comm = coord.comm0
         self.comm_world = None           # MPI.COMM_WORLD (set once)
+        self.on_start_barrier_done = coord.record_start  # called by World.Barrier
         self.events = coord.events0
         self.mode = "performance"
         self._coord = coord
@@ -324,6 +379,7 @@ class _Rank0Rt:
         if self.mode == "teaching":
             BarrierMod.barrier(
                 self.comm, rnd,
+                on_root_gathered=lambda r: self._coord.record_gather(r),
                 on_root_ready=lambda r: self._coord.on_round_ready(self._agg, r))
         return True
 
