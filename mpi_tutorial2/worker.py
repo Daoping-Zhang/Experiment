@@ -65,9 +65,6 @@ def run_demo(rt, control, params):
         # Do not ship multi-MB results back over the control channel — for
         # payload benchmarks the teacher only needs completion + no errors.
         final = None if params.get("payload") else _encode(result)
-        # Do not ship multi-MB results back over the control channel — for
-        # payload benchmarks the teacher only needs completion + no errors.
-        final = None if params.get("payload") else _encode(result)
         control.send({"t": P.C_DONE, "rank": rt.rank, "final": final,
                       "events": len(rt.events.events)})
     except Exception as e:  # noqa: BLE001
@@ -165,25 +162,27 @@ def main():
     ap.add_argument("--server", default="127.0.0.1:9000", help="rank 0 ip:port")
     args = ap.parse_args()
 
-    print("========================================\nMiniMPI Worker\n========================================")
-    print("Connecting to coordinator (%s)..." % args.server)
-
     from minimpi import mpi as M
-    rt = MiniRuntime(name="worker")
-    rt.register_with_teacher(args.server)   # what MPI.Init() does internally
-    M.Init()
-    rt.comm_world = M.World(rt)             # MPI.COMM_WORLD for the session
-    M.COMM_WORLD = rt.comm_world
-    shell = WorkerShell(rt)
+
+    # ---- MPI session starts: Init does connect/join/rank/size + COMM_WORLD
+    M.Init(server=args.server)
+
+    comm = M.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
 
     print("\nMiniMPI Worker")
-    print("Rank: %d / %d\n" % (rt.rank, rt.size))
+    print("Rank: %d / %d\n" % (rank, size))
     print("Waiting for Rank 0...")
 
+    # ---- wait/run loop (teacher commands drive collectives from here)
+    rt = M._session["rt"]
+    shell = WorkerShell(rt)
     while not shell.shutdown.wait(1.0):
         pass
     print("[shutdown]")
-    rt.close()
+
+    # ---- MPI session ends -------------------------------------------------
     M.Finalize()
 
 

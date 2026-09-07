@@ -21,10 +21,10 @@ mpi4py / MPI:
 Teaching extras (also via comm.*): naive_reduce / naive_allreduce /
 tree_reduce / tree_allreduce / ring_allreduce.
 
-Lifecycle note: the classroom runtime performs MPI.Init() before a demo runs
-and MPI.Finalize() when it finishes; student programs are `def run(comm, ...)`
-functions that receive MPI.COMM_WORLD and only need Get_rank / Get_size /
-send / recv / collectives.
+Lifecycle note: each process owns ONE MPI session — worker.py calls
+MPI.Init(server=...) once (which connects/joins the world and builds
+MPI.COMM_WORLD), runs many collectives, then calls MPI.Finalize() once at
+shutdown. Teacher (Rank 0) follows the same Init/COMM_WORLD/Finalize shape.
 """
 def _col():
     """Lazy loader for the sibling `collectives` package (works whether
@@ -49,22 +49,47 @@ XOR = "xor"
 ANY_SOURCE = -1
 ANY_TAG = -1
 
-# Bound while a demo is running (set by minimpi.collectives_dispatch.run).
+# Session state. COMM_WORLD is created by MPI.Init() (one MPI session per
+# process) and invalidated by MPI.Finalize().
 COMM_WORLD = None
 _alive = False
+_session = None     # {"rt": MiniRuntime, "control": control} on a worker
 
 
-def Init(argv=None):
-    """Start of the MPI lifecycle. The runtime calls this before each demo;
-    a student program may also call it defensively (no-op if already up)."""
-    global _alive
+def Init(server=None):
+    """Start ONE MPI session for this process.
+
+    Worker: MPI.Init(server) performs the whole bootstrap — create runtime,
+    connect to Rank 0, join the world, receive rank/size/peers — and then
+    builds MPI.COMM_WORLD. Rank 0: MPI.Init() marks the session start; the
+    Rank 0 COMM_WORLD is established once the coordinator is ready.
+    """
+    global _alive, COMM_WORLD, _session
+    if _alive:
+        return None
     _alive = True
+    if server is not None:                     # worker side
+        from .runtime import MiniRuntime
+        rt = MiniRuntime(name="worker")
+        rt.register_with_teacher(server)       # internal MPI.Init work
+        comm = World(rt)
+        rt.comm_world = comm
+        COMM_WORLD = comm
+        _session = {"rt": rt, "control": rt.control, "comm": comm}
     return None
 
 
 def Finalize():
-    """End of the MPI lifecycle (called by the runtime after each demo)."""
-    global _alive
+    """End the MPI session: close control/transport, drop COMM_WORLD."""
+    global _alive, COMM_WORLD, _session
+    if _session is not None:
+        rt = _session["rt"]
+        try:
+            rt.close()
+        except Exception:
+            pass
+        _session = None
+    COMM_WORLD = None
     _alive = False
     return None
 

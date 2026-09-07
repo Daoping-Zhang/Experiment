@@ -34,11 +34,12 @@ MPI_Send(&value, 1, MPI_INT, 1, 0, MPI_COMM_WORLD);   /* Tutorial 1 视角 */
 
 **① 初始化 / 生命周期**（真实 MPI 习惯，`minimpi/mpi.py` + `collectives_dispatch.run`）：
 ```python
-MPI.Init()                      # demo 开始
+MPI.Init()                      # MPI session 开始（worker 内部完成 connect/join/rank/size）
 comm = MPI.COMM_WORLD           # 得到本进程的 communicator
 rank = comm.Get_rank(); size = comm.Get_size()
+# … 多次 collective run（每次输入一个整数 → [n]×Data Size）…
 total = comm.allreduce(value, op=MPI.SUM)
-MPI.Finalize()                  # demo 结束
+MPI.Finalize()                  # MPI session 结束（进程只各一次）
 ```
 
 **② 同步点**（`comm.sync_round(r)`，在 `collectives/*.py` 每轮结束处可见）：

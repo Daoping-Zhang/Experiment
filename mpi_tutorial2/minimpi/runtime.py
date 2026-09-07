@@ -126,12 +126,13 @@ class MiniRuntime:
         return self.local_value
 
     def close(self):
+        """MPI session shutdown: close control + peer transport.
+        (Not a collective completion — no fake C_DONE is sent here.)"""
         if self.control is not None:
             try:
-                self.control.send({"t": P.C_DONE, "rank": self.rank, "final": False})
+                self.control.close()
             except Exception:
                 pass
-            self.control.close()
         self.transport.close()
 
 

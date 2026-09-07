@@ -113,6 +113,7 @@ class Coordinator:
         self.peers[0]["port"] = self.transport.port
         self.events0 = EventLog()
         self.comm0 = Communicator(self.transport, 0, size, events=self.events0)
+        self.rank0 = _Rank0Rt(self)          # persistent Rank 0 participant
 
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -234,6 +235,7 @@ class Coordinator:
         agg = Aggregator(self.size, teaching=(mode == "teaching"), auto=self.auto)
         self.agg = agg
         agg.reset()
+        self.events0.clear()   # rank0 events belong to this RUN only
         params = dict(params, mode=mode, size=self.size)
         params["peers"] = self.peers
         params["value0"] = params.pop("value0", 1)
@@ -251,7 +253,9 @@ class Coordinator:
     def _start_rank0(self, agg, params):
         def work():
             try:
-                rt = _Rank0Rt(self, agg)
+                rt = self.rank0
+                rt._agg = agg
+                rt.mode = "teaching" if agg.teaching else "performance"
                 result = collectives_dispatch.run(rt, params,
                                                   value=params.get("value0"))
                 if params.get("payload"):
@@ -303,17 +307,18 @@ class Coordinator:
 
 
 class _Rank0Rt:
-    """Minimal runtime facade so collectives code is identical for rank 0."""
+    """Rank 0 participant: created once per teacher session and reused by
+    every RUN, so Teacher uses one session-level COMM_WORLD like workers."""
 
-    def __init__(self, coord, agg):
+    def __init__(self, coord):
         self.rank = 0
         self.size = coord.size
-        self.name = "teacher"
         self.comm = coord.comm0
-        self.mode = "teaching" if agg.teaching else "performance"
+        self.comm_world = None           # MPI.COMM_WORLD (set once)
         self.events = coord.events0
+        self.mode = "performance"
         self._coord = coord
-        self._agg = agg
+        self._agg = None                 # current RUN aggregator
 
     def sync_round(self, rnd):
         if self.mode == "teaching":
@@ -359,8 +364,9 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True, value0=1):
         else:
             vector_len = 4
     if algo == "ring_allreduce" and vector_len % coord.size:
-        print("[skip] ring needs vector length divisible by size")
-        return None
+        vector_len = ((vector_len + coord.size - 1) // coord.size) * coord.size
+        print("(ring requires Data Size divisible by World Size; "
+              "using Data Size %d)" % vector_len)
 
     params = _params_for(algo, mode, payload=payload, vector_len=vector_len)
     params["value0"] = value0
@@ -421,10 +427,11 @@ def run_benchmark(coord):
 
 
 def wait_ready(coord, size):
-    print("\nWaiting for workers (%d/%d)..." % (len(coord.workers) + 1, size))
+    print("\nWaiting for ranks (%d/%d)..." % (len(coord.workers) + 1, size))
     while len(coord.workers) + 1 < size:
         time.sleep(0.4)
-    print("Ready: %d / %d\n" % (size, size))
+    print("MPI World Ready: %d / %d ranks (%d student workers)\n"
+          % (size, size, size - 1))
 
 
 def main():
@@ -446,74 +453,82 @@ def main():
         sys.exit("world size must be >= 1")
 
     from minimpi import mpi as M
-    M.Init()   # one MPI session for the whole teacher process (Rank 0)
-    print("========================================\nMiniMPI Classroom\n"
-          "========================================")
+
+    M.Init()                          # one MPI session for this process (Rank 0)
     coord = Coordinator(args.size, args.host, args.port, args.advertise,
                         auto=args.auto)
-    print("Coordinator: %s:%d" % (coord.advertise, coord.port))
-    print("Rank 0: Teacher (advertised %s:%d)" % (coord.advertise,
-                                                  coord.transport.port))
-    print("Expected World Size: %d" % args.size)
-
-    wait_ready(coord, args.size)
-    coord.connectivity_check()
-    print("Workers Ready: %d / %d\n" % (args.size, args.size))
-
-    if args.benchmark:
-        run_benchmark(coord)
-        coord.shutdown()
-        return
-    if args.demo:
-        run_demo(coord, args.demo, args.mode, payload=args.payload,
-                 vector_len=args.data_size)
-        coord.shutdown()
-        return
-
-    while True:
-        print("\n========================================\nMiniMPI Classroom\n"
+    try:
+        print("========================================\nMiniMPI Classroom\n"
               "========================================")
-        print("World Size: %d   Workers Ready: %d / %d\n"
-              % (args.size, args.size, args.size))
-        for i, (label, _) in enumerate(MENU, 1):
-            print("%d. %s" % (i, label))
-        try:
-            choice = input("\nSelect: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            break
-        if choice in ("9", "exit"):
-            break
-        if choice in ("8", "network"):
-            coord.connectivity_check()
-            continue
-        if choice in ("7", "benchmark"):
+        print("Coordinator: %s:%d" % (coord.advertise, coord.port))
+        print("Rank 0: Teacher (a real collective participant)")
+        print("Expected World Size: %d" % args.size)
+
+        wait_ready(coord, args.size)
+        coord.connectivity_check()
+
+        # Rank 0 COMM_WORLD is created ONCE and reused by every RUN.
+        comm0 = M.World(coord.rank0)
+        coord.rank0.comm_world = comm0
+        M.COMM_WORLD = comm0
+
+        if args.benchmark:
             run_benchmark(coord)
-            continue
-        try:
-            label, algo = MENU[int(choice) - 1]
-        except (ValueError, IndexError):
-            print("invalid choice")
-            continue
+            return
+        if args.demo:
+            run_demo(coord, args.demo, args.mode, payload=args.payload,
+                     vector_len=args.data_size)
+            return
 
-        # --- interactive run setup: data size -> mode -------------------
-        print("\nAlgorithm: %s" % algo)
-        ds = input("\nData Size (elements, int32 = %d B/elem, default 16):\n> " % P.ELEMENT_BYTES).strip()
-        ds = int(ds) if ds.isdigit() and int(ds) > 0 else 16
-        if algo == "ring_allreduce" and ds % coord.size:
-            ds = (ds // coord.size) * coord.size
-            print("(ring requires size-divisible vector; using data size %d)" % ds)
-        print("\nMode:")
-        print("1. Teaching")
-        print("2. Performance")
-        m = input("\nSelect: ").strip()
-        mode = "teaching" if m != "2" else "performance"
-        v = input("\nYour value (Rank 0, default 1):\n> ").strip()
-        v0 = int(v) if v.isdigit() else 1
-        run_demo(coord, algo, mode, vector_len=ds, value0=v0)
+        while True:
+            print("\n========================================\nMiniMPI Classroom\n"
+                  "========================================")
+            print("World Size: %d   MPI World Ready: %d / %d ranks\n"
+                  % (args.size, args.size, args.size))
+            for i, (label, _) in enumerate(MENU, 1):
+                print("%d. %s" % (i, label))
+            try:
+                choice = input("\nSelect: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if choice in ("9", "exit"):
+                break
+            if choice in ("8", "network"):
+                coord.connectivity_check()
+                continue
+            if choice in ("7", "benchmark"):
+                run_benchmark(coord)
+                continue
+            try:
+                label, algo = MENU[int(choice) - 1]
+            except (ValueError, IndexError):
+                print("invalid choice")
+                continue
 
-    coord.shutdown()
-    M.Finalize()
-    print("Bye.")
+            # --- interactive run setup: data size -> rank0 value -> mode ---
+            print("\nAlgorithm: %s" % algo)
+            ds_raw = input("\nData Size (elements, int32 = %d B/elem, default 16):\n> "
+                           % P.ELEMENT_BYTES).strip()
+            try:
+                ds = int(ds_raw) if ds_raw.isdigit() and int(ds_raw) > 0 else 16
+            except ValueError:
+                ds = 16
+            print("\nMode:")
+            print("1. Teaching")
+            print("2. Performance")
+            m = input("\nSelect: ").strip()
+            mode = "teaching" if m != "2" else "performance"
+            v = input("\nYour value (Rank 0, default 1):\n> ").strip()
+            try:
+                v0 = int(v)
+            except ValueError:
+                v0 = 1
+            run_demo(coord, algo, mode, vector_len=ds, value0=v0)
+
+        print("Bye.")
+    finally:
+        coord.shutdown()              # notify workers + close control server
+        M.Finalize()                  # every exit path ends the MPI session
 
 
 if __name__ == "__main__":
