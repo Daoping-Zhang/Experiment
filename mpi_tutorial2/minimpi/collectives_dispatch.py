@@ -61,7 +61,8 @@ def run(rt, params, value=None):
     """
     from . import mpi as M
 
-    comm = M.World(rt)
+    comm = getattr(rt, "comm_world", None) or M.World(rt)
+    rt.comm_world = comm
     comm.configure(algorithm=params["algorithm"],
                    fmt=params.get("fmt", P.FMT_INT32))
     M.COMM_WORLD = comm

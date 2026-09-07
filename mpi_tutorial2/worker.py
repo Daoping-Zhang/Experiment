@@ -168,8 +168,12 @@ def main():
     print("========================================\nMiniMPI Worker\n========================================")
     print("Connecting to coordinator (%s)..." % args.server)
 
+    from minimpi import mpi as M
     rt = MiniRuntime(name="worker")
-    rt.register_with_teacher(args.server)
+    rt.register_with_teacher(args.server)   # what MPI.Init() does internally
+    M.Init()
+    rt.comm_world = M.World(rt)             # MPI.COMM_WORLD for the session
+    M.COMM_WORLD = rt.comm_world
     shell = WorkerShell(rt)
 
     print("\nMiniMPI Worker")
@@ -180,6 +184,7 @@ def main():
         pass
     print("[shutdown]")
     rt.close()
+    M.Finalize()
 
 
 if __name__ == "__main__":

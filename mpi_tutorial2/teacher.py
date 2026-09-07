@@ -445,6 +445,8 @@ def main():
     if args.size < 1:
         sys.exit("world size must be >= 1")
 
+    from minimpi import mpi as M
+    M.Init()   # one MPI session for the whole teacher process (Rank 0)
     print("========================================\nMiniMPI Classroom\n"
           "========================================")
     coord = Coordinator(args.size, args.host, args.port, args.advertise,
@@ -510,6 +512,7 @@ def main():
         run_demo(coord, algo, mode, vector_len=ds, value0=v0)
 
     coord.shutdown()
+    M.Finalize()
     print("Bye.")
 
 
