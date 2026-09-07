@@ -20,14 +20,21 @@ ANY_SOURCE = -1
 ANY_TAG = -1
 
 # tag meanings inside the MiniMPI DATA plane (all via comm.send/comm.recv):
-#   ALGO_TAG_BASE   : collective payloads (each algorithm module picks its
-#                     own tag; barrier messages live far away, so an
-#                     algorithm message can never match a barrier recv and
-#                     vice versa)
-#   BARRIER_TAG_BASE: teaching sync / start-barrier messages. A barrier is
-#                     implemented as an allreduce-of-1 — that is a MiniMPI
-#                     TEACHING implementation, NOT a statement about real MPI
-#                     (production MPI may use dedicated barrier algorithms).
+#   ALGO_TAG_BASE   : upper bound of the algorithm tag region. Every collective
+#                     module owns ONE small dedicated channel tag below it
+#                     (ping_pong=0, naive_reduce=101, naive_allreduce=201,
+#                     tree_reduce=301, tree_allreduce=401, ring_allreduce=501),
+#                     so within one run messages of different algorithms can
+#                     never be confused.
+#   BARRIER_TAG_BASE: teaching sync / start-barrier messages begin here;
+#                     the barrier of round r uses tag BARRIER_TAG_BASE + r.
+#                     A barrier is implemented as an allreduce-of-1 — that is
+#                     a MiniMPI TEACHING implementation, NOT a statement about
+#                     real MPI (production MPI may use dedicated barrier
+#                     algorithms).
+# Algorithm tags (< ALGO_TAG_BASE) and barrier tags (>= BARRIER_TAG_BASE) live
+# in disjoint regions, so an algorithm message can never satisfy a barrier
+# recv_match and vice versa.
 # Classroom control (RUN / DONE / SHUTDOWN) is NOT an MPI message and has no
 # MPI tag — it travels over its own control channel.
 ALGO_TAG_BASE = 1000

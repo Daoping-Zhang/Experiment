@@ -25,10 +25,14 @@ Naive / Tree / Ring collectives
 ```c
 MPI_Send(&value, 1, MPI_INT, 1, 0, MPI_COMM_WORLD);   /* Tutorial 1 视角 */
                         // dest=1  : 发给谁（数据面去向）
-                        // tag=0   : 走哪条信道：0=数据面(TAG_DATA)，1=控制/同步面(TAG_CONTROL)
-                        // comm    : 哪个组 —— 由 teacher 的 CONTROL plane 注册时建立的成员表
+                        // tag=0   : 数据面点对点 payload（Tutorial 1 同款 tag=0）
+                        // comm    : 哪个组 —— MPI_COMM_WORLD = teacher 注册时建立的成员表
 ```
-（collective 匹配用独立 tag；teaching 同步消息用 `CTRL_TAG_BASE` 起，见 `minimpi/protocol.py`。）
+MiniMPI 数据面 tag 分区（见 `minimpi/protocol.py`）：每个 collective 模块占用
+一个专属小 tag 通道（ping_pong=0，naive/tree/ring=101/201/301/401/501）；teaching
+同步 / Start Barrier 从 `BARRIER_TAG_BASE=7000` 起（实际 tag = 7000+rnd）。两区
+不相交、永不误配；课堂控制消息（RUN/DONE/SHUTDOWN）走独立控制信道，不是 MPI
+消息、没有 tag。
 
 ## 1.5 学生只需看三处核心代码
 
@@ -61,7 +65,7 @@ Performance 模式 = 空操作。算法本身从不分支。
 | `MPI_Allreduce(...,MPI_SUM,comm)` | `comm.allreduce(value, op)` |
 | 教学扩展 | `comm.naive_*/tree_*/ring_*` |
 
-## 1.5 课堂阅读路径
+## 1.6 课堂阅读路径
 
 学生主要阅读：
 
@@ -100,8 +104,10 @@ collective（同一份算法文件）
 `comm.sync_round(rnd)` —— Teaching=round barrier（数据面 allreduce-of-1，属于
 MiniMPI 教学实现，不代表真实 MPI barrier 算法），Performance=no-op。
 
-**Tag 分离**：`ALGO_TAG_BASE=1000`（算法 payload）与 `BARRIER_TAG_BASE=7000`
-（同步消息）互不匹配；classroom 控制（RUN/DONE/SHUTDOWN）走独立 control
+**Tag 分离**：算法消息用各模块专属小 tag（ping_pong=0，naive/tree/ring=
+101/201/301/401/501），全部 < `ALGO_TAG_BASE=1000`；teaching 同步消息从
+`BARRIER_TAG_BASE=7000` 起（=7000+rnd）。两区不相交，算法消息永不误配到
+barrier 接收、反之亦然；classroom 控制（RUN/DONE/SHUTDOWN）走独立 control
 channel，不是 MPI message、没有 tag。
 
 **Timing（本轮唯一教学指标）**
@@ -123,7 +129,7 @@ mpi_tutorial2/
 │   ├── transport.py      # 唯一允许碰 socket 的层：帧协议 + 匹配队列
 │   ├── communicator.py   # send/recv + 值编解码 + combine 内核
 │   ├── barrier.py        # teaching 同步：数据面 allreduce-of-1
-│   ├── synchronization.py# (deprecated) 旧控制面握手，已由 barrier 取代
+│   ├── collectives_dispatch.py# RUN → World + Start Barrier + 算法分发
 │   ├── metrics.py        # CommunicationEvent / EventLog
 │   └── runtime.py        # rank 端身份、事件、round 同步
 ├── collectives/          # 每个算法只调 comm.send/comm.recv
