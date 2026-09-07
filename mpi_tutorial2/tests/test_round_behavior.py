@@ -61,8 +61,10 @@ def test_a_start_barrier_slow_rank():
     if not timed_out:
         out, _ = t.communicate(timeout=5)
     r.kill()
-    # teacher wall time is printed as "Collective complete. Total wall time"
-    m = re.search(r"Total wall time:\s*([0-9.]+)\s*s", out or "")
+    # the slow rank's input delay pushes the Start Barrier late, which shows
+    # up in the session wall time (input itself is excluded from Collective
+    # Time by design). Teacher prints "Session wall time: X.XXX s".
+    m = re.search(r"Session wall time:\s*([0-9.]+)\s*s", out or "")
     wall = float(m.group(1)) if m else 0.0
     ok = not timed_out and "Errors:" not in (out or "") and wall >= 2.5
     check("A. start barrier delays collective for slow rank", ok,
@@ -72,31 +74,44 @@ def test_a_start_barrier_slow_rank():
 def test_b_teaching_pause_excluded():
     env = dict(os.environ)
     env["MINIMPI_TEACH_PAUSE"] = "2.0"     # 2 s pause after gather
-    r = Runner(4, timeout=60)
-    import subprocess
-    t = r.teacher(["--auto", "--demo", "naive_allreduce", "--mode", "teaching",
-                   "--data-size", "16"])
-    time.sleep(2)
-    ws = []
-    for _ in range(3):
-        ws.append(subprocess.Popen(
-            [sys.executable, os.path.join(os.path.dirname(HERE), "worker.py"),
-             "--server", "127.0.0.1:%d" % r.port],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env))
-    deadline = time.time() + 50
-    while time.time() < deadline and t.poll() is None:
-        time.sleep(0.3)
-    timed_out = t.poll() is None
-    out = ""
-    if not timed_out:
-        out, _ = t.communicate(timeout=5)
-    r.kill()
-    m = re.search(r"Round Finished At:\s*([0-9.]+)\s*ms", out or "")
-    rms = float(m.group(1)) if m else None
-    ok = (not timed_out) and (rms is not None) and rms < 1000 and \
-         "Errors:" not in (out or "")
-    check("B. teaching pause excluded from Round time", ok,
-          "RoundFinished=%.2fms (pause=2s)" % (rms or -1))
+    # Runner._spawn copies os.environ at spawn time -> the TEACHER child must
+    # inherit the pause too, otherwise the pause never actually runs and the
+    # test would pass vacuously.
+    os.environ["MINIMPI_TEACH_PAUSE"] = "2.0"
+    try:
+        r = Runner(4, timeout=60)
+        import subprocess
+        t_start = time.time()
+        t = r.teacher(["--auto", "--demo", "naive_allreduce", "--mode", "teaching",
+                       "--data-size", "16"])
+        time.sleep(2)
+        ws = []
+        for _ in range(3):
+            ws.append(subprocess.Popen(
+                [sys.executable, os.path.join(os.path.dirname(HERE), "worker.py"),
+                 "--server", "127.0.0.1:%d" % r.port],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env))
+        deadline = time.time() + 50
+        while time.time() < deadline and t.poll() is None:
+            time.sleep(0.3)
+        timed_out = t.poll() is None
+        out = ""
+        if not timed_out:
+            out, _ = t.communicate(timeout=5)
+        elapsed = time.time() - t_start
+        r.kill()
+        m = re.search(r"Round Finished At:\s*([0-9.]+)\s*ms", out or "")
+        rms = float(m.group(1)) if m else None
+        # naive_allreduce = 2 teaching rounds x 2 s teacher pause -> the run
+        # must really have taken >= ~3.5 s, while the displayed Round time
+        # stays well below 1 s (pause excluded from round timing).
+        ok = (not timed_out) and (rms is not None) and rms < 1000 and \
+             elapsed >= 3.5 and "Errors:" not in (out or "")
+        check("B. teaching pause excluded from Round time", ok,
+              "RoundFinished=%.2fms elapsed=%.1fs (pause=2s)"
+              % (rms or -1, elapsed))
+    finally:
+        os.environ.pop("MINIMPI_TEACH_PAUSE", None)
 
 
 def test_c_teaching_rounds_block_and_finish():
@@ -136,15 +151,17 @@ def test_e_tag_isolation():
     b.set_peers(1, {0: (a.host, a.port)})
 
     def send():
-        a.send_to(1, {"tag": 1001}, b"ALGO")     # algorithm tag
-        a.send_to(1, {"tag": 7001}, b"BARR")     # barrier tag
+        # real project tags: tree_allreduce algorithm channel = 401,
+        # round-1 teaching barrier = BARRIER_TAG_BASE(7000) + 1
+        a.send_to(1, {"tag": 401}, b"ALGO")     # algorithm tag
+        a.send_to(1, {"tag": 7001}, b"BARR")    # barrier tag
 
     th = threading.Thread(target=send)
     th.start()
-    h1, p1 = b.recv_match(tag=1001)              # algo recv gets algo message
-    h2, p2 = b.recv_match(tag=7001)              # barrier recv gets barrier msg
+    h1, p1 = b.recv_match(tag=401)              # algo recv gets algo message
+    h2, p2 = b.recv_match(tag=7001)             # barrier recv gets barrier msg
     th.join(timeout=5)
-    ok = p1 == b"ALGO" and p2 == b"BARR" and h1["tag"] == 1001 and h2["tag"] == 7001
+    ok = p1 == b"ALGO" and p2 == b"BARR" and h1["tag"] == 401 and h2["tag"] == 7001
     a.close(); b.close()
     check("E. algorithm/barrier tags never cross-match", ok)
 

@@ -18,7 +18,7 @@ Naive / Tree / Ring collectives
 - **两层分离**：Control Plane（学生 ↔ teacher：join/rank/peer 表/算法选择/指标收集）与 Data Plane（worker ↔ worker 的 TCP 帧）互不混淆；collective payload 从不经过 coordinator。
 - **全部 collective 只用 `send/recv`**：`naive_reduce/allreduce`、`tree_reduce/allreduce`（二项树）、`ring_allreduce`（reduce-scatter + allgather）。
 - **Teaching / Performance 用同一套代码**，唯一差别是每轮结束后的同步点：
-  - Teaching：每轮结束人人参与一个**数据面 barrier = allreduce 传 1**（类似 NCCL 把 barrier 做成 dummy allreduce）；rank 0 收齐即"全班完成本轮"，打印全局视图、按 ENTER 才放行下一轮。
+  - Teaching：每轮结束人人参与一个**数据面 Barrier = AllReduce-of-1**：每 rank 贡献 `[1]`，rank 0 求和得到 `world_size` 再广播回去——每个 rank 拿到 `world_size` 即"全班到齐"；rank 0 收齐后打印全局视图、按 ENTER 才放行下一轮。每次 RUN 前的 Start Barrier（`comm.Barrier()`）同理。
   - Performance：无 barrier，rank 连续执行，round 只是日志标签。
 
 ### 参数 ↔ 平面（一句话教学映射）
@@ -110,13 +110,22 @@ MiniMPI 教学实现，不代表真实 MPI barrier 算法），Performance=no-op
 barrier 接收、反之亦然；classroom 控制（RUN/DONE/SHUTDOWN）走独立 control
 channel，不是 MPI message、没有 tag。
 
-**Timing（本轮唯一教学指标）**
-- `My Send Finished At`：本 rank 本轮最后一次算法 send 完成时刻相对本轮开始（无 send 显示 `N/A`，不伪造）。
-- `Round Finished At`：teacher 时钟上"所有 rank 完成本轮"（round barrier gather 完成）相对上一轮 release / Start Barrier 的时间。teacher ENTER/讲解属于教学暂停，发生在 gather 之后、release 之前，**不计入** round time（有测试验证）。
-- `Waiting After My Send` ≈ 本轮结束(自身工作) − My Send Finished。
+**Start Barrier（每次 RUN 前，两种 Mode 都有）**：`comm.Barrier()` 内部是
+AllReduce-of-1（`minimpi/barrier.py`）：每 rank 发 `[1]`，rank 0 求和 = `world_size`
+再广播。rank 0 在"全班到齐（gather 完成）之后、广播 release 之前"打时间戳，所以
+Round 1 / Collective Time 的起点不会因为 release 的顺序而偏晚。
 
-**性能实验**：Performance Mode 不打印/不上传每轮教学事件；只测 Collective Wall Time。
-不预设 Tree/Ring 谁赢（Python/TCP/拓扑/机器相关，结果来自真实测量）。
+**Timing（课堂核心 = 两个时刻）**
+- `My Send Finished At`：本 rank 本轮最后一次算法 send 完成时刻相对本轮开始（无 send 显示 `N/A`，不伪造）。学生 UI 打印完这一行后显示 `Waiting for round completion...`——"我早就发完了，但整轮要等最慢的人"。
+- `Round Finished At`：teacher 时钟上"所有 rank 完成本轮"（round barrier gather 完成）相对上一轮 release / Start Barrier 的时间。teacher ENTER/讲解属于教学暂停，发生在 gather 之后、release 之前，**不计入** round time（有测试验证）。
+- 课堂直接比较 `My Send Finished 0.72 ms` vs `Round Finished 4.50 ms`，学生就能看到：自己的任务早已结束，同步要等最慢的参与者。（各 rank 的 send 时刻用各自时钟，单机/教室局域网下近似可比。）
+- advanced/debug（`MINIMPI_SHOW_WORK=1`）：`My Round Work Finished At` = 本 rank 自身时钟的本地工作结束时刻，**不是**"等待别人"的时间。
+
+**性能实验**：Performance Mode 不打印/不上传每轮教学事件。`Collective Time`
+从 Start Barrier"全班到齐"（rank 0 gather 完成）那一刻开始，到**所有 rank 上报
+完成（C_DONE 收齐）**为止；C_RUN 下发、学生输入、数据构造、Start Barrier 等待
+都不计入。另有 `Session wall time`（含输入/控制/UI），只说明课堂节奏、不是算法
+性能。不预设 Tree/Ring 谁赢（Python/TCP/拓扑/机器相关，结果来自真实测量）。
 
 ## 2. 目录
 
@@ -196,7 +205,7 @@ Tree Reduce / Tree AllReduce（log(P) 轮，减热点）
 Message-size benchmark（8B..4MB × 三种 allreduce）
 ```
 
-**Teaching Mode** 每轮结束：全班在数据面 barrier 汇合 → teacher 打印该轮全局通信视图 → 按 ENTER → 放行下一轮。学生终端各自显示自己的 local view（收发、payload、transfer time、本地值变化）。**Performance Mode** 无人工同步，跑完给出汇总时长。
+**Teaching Mode** 每轮结束：全班在数据面 barrier 汇合 → teacher 打印该轮全局通信视图 → 按 ENTER → 放行下一轮。学生终端各自显示自己的 local view：收发、payload、`My Send Finished At`、然后 `Waiting for round completion...`；teacher 端给出该轮的 `Round Finished At`。**Performance Mode** 无人工同步，跑完给出 `Collective Time`（Start Barrier 到齐 → 全体完成）与 `Session wall time`。
 
 ## 5. 协议速览
 

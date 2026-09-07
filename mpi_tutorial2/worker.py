@@ -115,15 +115,16 @@ def _show_round(rt, rnd):
             print("  Receive:\n  Rank %d <- Rank %d\n  %s" %
                   (rt.rank, e.source, fmt_bytes(e.payload_bytes)))
     send_ms, work_ms = rt.comm_world.snapshot_ms()
-    rt._snap = (send_ms, work_ms)
+    rt._snap = (send_ms, work_ms)      # uploaded with C_ROUND_DONE (teacher)
     send_txt = "N/A" if send_ms is None else "%.2f ms" % send_ms
     print("\nMy Send Finished At: %s" % send_txt)
-    if send_ms is not None and work_ms is not None:
-        print("Round Work Finished At: %.2f ms" % work_ms)
-        print("Waiting After My Send: %.2f ms" % max(0.0, work_ms - send_ms))
-    else:
-        print("Round Work Finished At: %.2f ms" % (work_ms or 0.0))
-    print("\nWaiting for other ranks...")
+    # Debug/advanced only — NOT a "sync wait": it is this rank's own-clock
+    # local work finish (no teacher clock, no other ranks involved).
+    if os.environ.get("MINIMPI_SHOW_WORK"):
+        work_txt = "N/A" if work_ms is None else "%.2f ms" % work_ms
+        print("My Round Work Finished At: %s   (this rank's own clock)"
+              % work_txt)
+    print("\nWaiting for round completion...")
 
 
 class WorkerShell:

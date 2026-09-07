@@ -40,8 +40,7 @@ ANY_TAG = -1
 ALGO_TAG_BASE = 1000
 BARRIER_TAG_BASE = 7000
 
-TAG_DATA = 0
-TAG_BARRIER = 1            # reserved barrier designator (actual tag: base+round)
+TAG_DATA = 0     # plain point-to-point payload tag (ping_pong, Tutorial-1 style)
 
 # Event / message classification: what a message is FOR.
 KIND_ALGO = "algorithm"    # real collective payload communication

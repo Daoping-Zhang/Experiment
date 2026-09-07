@@ -171,15 +171,20 @@ class World:
         return send_ms, work_ms
 
     def Barrier(self):
-        """Start-of-RUN barrier (both modes). Allreduce-of-1 internally —
-        a MiniMPI teaching implementation of a barrier, not real-MPI's
-        barrier algorithm."""
+        """Start-of-RUN barrier (both modes). Internally an AllReduce-of-1:
+        every rank contributes [1], rank 0 reduces to world_size and
+        broadcasts it back — a MiniMPI teaching implementation of a barrier,
+        not real-MPI's barrier algorithm."""
         from . import barrier as B
-        B.barrier(self._rt.comm, 0)   # tag = BARRIER_TAG_BASE + 0
+        # Rank 0 fires `on_start_gathered` as soon as EVERY rank has arrived
+        # (gather complete) but BEFORE it broadcasts the release — that is the
+        # true "all ranks ready" instant, so timing never starts late (a
+        # released rank may already begin round 1 while rank 0 is still
+        # sending releases).
+        cb = None
         if self.rank == 0:
-            cb = getattr(self._rt, "on_start_barrier_done", None)
-            if cb is not None:
-                cb()
+            cb = getattr(self._rt, "on_start_gathered", None)
+        B.barrier(self._rt.comm, 0, on_root_gathered=cb)
 
     def sync_round(self, rnd):
         """End of logical round rnd.

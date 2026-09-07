@@ -1,55 +1,73 @@
 """barrier.py — teaching-mode round barrier over the DATA plane only.
 
-Between two logical rounds, every rank must prove it finished round r before
-anyone starts round r+1. Instead of a control-plane handshake, this is done
-NCCL-style: a tiny allreduce that passes the value 1.
+MiniMPI implements Barrier internally as an AllReduce-of-1:
 
-    non-root: send([1] -> root)  then  recv([1] <- root)
-    root:     recv [1] from every rank  ->  [teacher prints round r, ENTER]
-              send([1] -> every rank)
+    every rank contributes [1]
+              ↓  (reduce, sum)
+    rank 0 (root) gets  world_size  = 1 + 1 + ... + 1
+              ↓  (broadcast)
+    every rank ends with world_size
 
-So rank 0 (the teacher) only completes the barrier after it has shown the
-global view of round r and released the class manually. Built on the same
-comm.send/comm.recv primitives as every collective.
+So finishing the barrier means: I received `world_size`, i.e. every rank
+arrived. Between two logical rounds this is what proves round r is complete
+before anyone starts round r+1 — built on the same comm.send/comm.recv
+primitives as every collective (never calling the student collectives, which
+would recurse through their own sync_round).
+
+    non-root: send([1] -> root)  then  recv([world_size] <- root)
+    root:     recv [1] from every rank  ->  sum = world_size
+                  -> on_root_gathered(rnd)   (all ranks finished this round)
+                  -> on_root_ready(rnd)      (teacher display / ENTER pause)
+              send([world_size] -> every rank)
+
+So rank 0 (the teacher) only finishes the barrier after it has shown the
+global view of round r and released the class manually. Teaching pauses
+between on_root_gathered and on_root_ready are AFTER the gather time, so they
+never enter round timing. Performance mode never calls this barrier.
+
+Barrier messages use their own tag region (BARRIER_TAG_BASE + rnd) and
+kind=barrier, so they can never match — or be shown as — algorithm traffic.
 """
 from . import protocol as P
 
 BASE_TAG = P.BARRIER_TAG_BASE   # barrier tag = BARRIER_TAG_BASE + rnd
 
 
-def barrier(comm, rnd, on_root_ready=None, on_root_gathered=None):
-    """Blocking data-plane barrier (allreduce-of-1, MiniMPI teaching impl).
+def barrier(comm, rnd, on_root_gathered=None, on_root_ready=None):
+    """Blocking data-plane AllReduce-of-1 barrier (MiniMPI teaching impl).
 
-    non-root: send([1] -> root)  then  recv([1] <- root)
-    root:     recv [1] from every rank
-                  -> on_root_gathered(rnd)   (all ranks finished this round)
-                  -> on_root_ready(rnd)      (teacher display / ENTER pause)
-              send([1] -> every rank)
+    Every rank contributes 1; rank 0 reduces them to world_size and
+    broadcasts it back. Returns the reduced total (= world_size when every
+    rank arrived).
 
-    Teaching pauses between on_root_gathered and on_root_ready; that pause is
-    AFTER the gather time, so it never enters round timing. Performance mode
-    never calls this barrier.
+    root: recv [1] from every rank
+              -> on_root_gathered(rnd)   (all ranks finished this round)
+              -> on_root_ready(rnd)      (teacher display / ENTER pause)
+          broadcast [world_size] to every rank
+    non-root: send([1] -> root)  then  recv([world_size] <- root)
     """
     root = 0
     tag = BASE_TAG + rnd
     if comm.rank == root:
+        total = 1                     # root's own contribution
         for _ in range(1, comm.size):
-            comm.recv(source=P.ANY_SOURCE, tag=tag, fmt="i32",
-                      algo="teaching-barrier", phase="sync-wait", rnd=rnd,
-                      kind=P.KIND_BARRIER)
+            token = comm.recv(source=P.ANY_SOURCE, tag=tag, fmt="i32",
+                              algo="teaching-barrier", phase="sync-wait",
+                              rnd=rnd, kind=P.KIND_BARRIER)
+            total += int(token[0]) if token else 1
         if on_root_gathered is not None:
             on_root_gathered(rnd)
         if on_root_ready is not None:
             on_root_ready(rnd)
         for dst in range(1, comm.size):
-            comm.send([1], dest=dst, tag=tag, fmt="i32",
+            comm.send([total], dest=dst, tag=tag, fmt="i32",
                       algo="teaching-barrier", phase="sync-go", rnd=rnd,
                       kind=P.KIND_BARRIER)
-    else:
-        comm.send([1], dest=root, tag=tag, fmt="i32",
-                  algo="teaching-barrier", phase="sync-wait", rnd=rnd,
-                  kind=P.KIND_BARRIER)
-        comm.recv(source=root, tag=tag, fmt="i32",
-                  algo="teaching-barrier", phase="sync-go", rnd=rnd,
-                  kind=P.KIND_BARRIER)
-    return True
+        return total
+    comm.send([1], dest=root, tag=tag, fmt="i32",
+              algo="teaching-barrier", phase="sync-wait", rnd=rnd,
+              kind=P.KIND_BARRIER)
+    token = comm.recv(source=root, tag=tag, fmt="i32",
+                      algo="teaching-barrier", phase="sync-go", rnd=rnd,
+                      kind=P.KIND_BARRIER)
+    return int(token[0]) if token else 1

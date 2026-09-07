@@ -112,7 +112,9 @@ class Coordinator:
         self.next_rank = 1
         self.closed = False
         self.agg = None
-        self._timing = {"start": None, "gather": {}, "release": {}}
+        # teacher-clock timings (ns)
+        self._timing = {"start": None, "gather": {}, "release": {},
+                        "col_start": None, "col_end": None}
 
         self.transport = PeerTransport("teacher", bind_host=self.host)
         self.peers[0]["port"] = self.transport.port
@@ -252,6 +254,10 @@ class Coordinator:
         self._start_rank0(agg, params)
         if not agg.wait_all_done(timeout=600):
             print("[TIMEOUT] demo did not finish; done=%s" % sorted(agg.done))
+        # Collective Time ends when ALL ranks reported C_DONE (the collective
+        # really finished everywhere) — student input / RUN control / Start
+        # Barrier waiting all happened before `col_start` and stay outside it.
+        self._timing["col_end"] = now_ns()
         if agg.errors:
             print("Errors:", agg.errors)
         self.agg = None
@@ -291,19 +297,17 @@ class Coordinator:
         timing = agg.timing.get(rnd, {})
         # Rank 0 (teacher) timings from its own World snapshot
         if self.rank0.comm_world is not None:
-            send0, work0 = self.rank0.comm_world.snapshot_ms()
-            timing.setdefault(0, {"send": send0, "work": work0})
+            send0, _work0 = self.rank0.comm_world.snapshot_ms()
+            timing.setdefault(0, {"send": send0})
         for rk in range(self.size):
             t = timing.get(rk)
             send = None if t is None else t.get("send")
-            work = None if t is None else t.get("work")
             send_txt = "N/A" if send is None else "%.2f ms" % send
-            work_txt = "N/A" if work is None else "%.2f ms" % work
-            print("  Rank %d send finished %s   (round work %s)"
-                  % (rk, send_txt, work_txt))
+            print("  Rank %d send finished %s" % (rk, send_txt))
         rms = self.round_ms(rnd)
         print("Round Finished At: %s" %
               ("%.2f ms" % rms if rms is not None else "N/A"))
+        print("  (compare My Send Finished At per rank vs the round total)")
         print("\nAll ranks completed Round %d." % rnd)
 
         import os as _os, time as _time
@@ -329,7 +333,22 @@ class Coordinator:
 
     # ---- round timing (teacher clock; teaching pauses excluded) ---------
     def record_start(self):
-        self._timing["start"] = now_ns()
+        """Start Barrier: EVERY rank has arrived (gather complete, release
+        not yet sent). This is the baseline for Round 1 AND for the
+        Performance-mode Collective Time — anything before it (C_RUN send,
+        student input, vector build, waiting for slow ranks) is NOT part of
+        the algorithm measurement."""
+        ns = now_ns()
+        self._timing["start"] = ns
+        self._timing["col_start"] = ns
+
+    def collective_ms(self):
+        """Performance Collective Time = Start Barrier complete (all ranks
+        ready) -> all ranks done. None if never started / never finished."""
+        cs, ce = self._timing["col_start"], self._timing["col_end"]
+        if cs is None or ce is None:
+            return None
+        return (ce - cs) / 1e6
 
     def record_gather(self, rnd):
         self._timing["gather"][rnd] = now_ns()
@@ -369,7 +388,10 @@ class _Rank0Rt:
         self.size = coord.size
         self.comm = coord.comm0
         self.comm_world = None           # MPI.COMM_WORLD (set once)
-        self.on_start_barrier_done = coord.record_start  # called by World.Barrier
+        # Start Barrier fires this when every rank has ARRIVED (gather done,
+        # before rank 0 sends the release broadcast) — record_start() then
+        # happens exactly at "all ranks ready", never late.
+        self.on_start_gathered = lambda rnd: coord.record_start()
         self.events = coord.events0
         self.mode = "performance"
         self._coord = coord
@@ -437,7 +459,12 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True, value0=1):
     agg = coord.run_demo(params, mode)
     dt = time.time() - t0
     if show and agg:
-        print("\nCollective complete.  Total wall time: %.3f s" % dt)
+        cms = coord.collective_ms()
+        print("\nCollective complete.")
+        print("  Collective Time: %s  (Start Barrier complete -> all ranks done)"
+              % ("%.2f ms" % cms if cms is not None else "N/A"))
+        print("  Session wall time: %.3f s  (incl. student input / control / UI)"
+              % dt)
         for r in sorted(agg.results):
             print("  Rank %d final = %s" % (r, _fmt_value(agg.results[r])))
         if algo in ("naive_reduce", "tree_reduce"):
@@ -476,9 +503,9 @@ def run_benchmark(coord):
             if a == "ring_allreduce" and sz % coord.size:
                 row += "n/a".ljust(18)
                 continue
-            t0 = time.time()
             run_demo(coord, a, "performance", payload=sz, show=False)
-            row += ("%7.2f ms" % ((time.time() - t0) * 1000)).ljust(18)
+            cms = coord.collective_ms()      # Start Barrier -> all ranks done
+            row += ("%7.2f ms" % cms if cms is not None else "n/a").ljust(18)
         print(row)
 
 
