@@ -49,8 +49,7 @@ class Runner:
         ps = []
         for i in range(1, self.size):
             args = [PY, os.path.join(ROOT, "worker.py"),
-                    "--server", "127.0.0.1:%d" % self.port,
-                    "--name", (names[i - 1] if names else "W%d" % i)]
+                    "--server", "127.0.0.1:%d" % self.port]
             ps.append(self._spawn(args, "worker%d" % i))
         return ps
 

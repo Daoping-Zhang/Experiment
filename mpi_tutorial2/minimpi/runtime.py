@@ -74,7 +74,7 @@ class MiniRuntime:
         self.done_error = None
 
     # ------------------------------------------------------------------ join
-    def register_with_teacher(self, server, name):
+    def register_with_teacher(self, server, name=None):
         """Worker path: connect control, join, receive rank/size/peers."""
         if ":" in server:
             host, port = server.rsplit(":", 1)
@@ -84,9 +84,8 @@ class MiniRuntime:
         self.control = SendRecvControl(host, port)
         ip = _detect_ip(host)
         self.advertise_ip = ip
-        self.control.send({"t": P.C_JOIN, "name": name, "host": ip,
-                           "port": self.transport.port,
-                           "value": getattr(self, "base", None)})
+        self.control.send({"t": P.C_JOIN, "host": ip,
+                           "port": self.transport.port})
         welcome = self.control.recv()
         if welcome is None or welcome.get("t") != P.C_WELCOME:
             raise RuntimeError("did not receive welcome from teacher")
@@ -119,11 +118,11 @@ class MiniRuntime:
         return True
 
     # ------------------------------------------------------------------ run
-    def run_algorithm(self, params):
-        """Execute the collective named in params; store result; report done."""
+    def run_algorithm(self, params, value=None):
+        """Execute the collective named in params; store result."""
         from . import collectives_dispatch
         self.events.clear()
-        self.local_value = collectives_dispatch.run(self, params)
+        self.local_value = collectives_dispatch.run(self, params, value=value)
         return self.local_value
 
     def close(self):

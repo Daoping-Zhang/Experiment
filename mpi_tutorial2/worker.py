@@ -2,7 +2,7 @@
 """worker.py — one student rank (a MiniMPI worker).
 
 Usage:
-    python3 worker.py --server <teacher-ip>:<port> [--name Alice]
+    python3 worker.py --server <teacher-ip>:<port>
 """
 import argparse
 import base64
@@ -35,6 +35,14 @@ def run_demo(rt, control, params):
                    "data_size": params.get("data_size", params.get("vector_len", 0)),
                    "vector_len": params.get("vector_len", 0),
                    "fmt": params.get("fmt", "i32")}
+
+    # ---- student inputs ONE integer for this run ----------------------
+    ds = rt.run_meta["data_size"]
+    print("\nAlgorithm: %s\nData Size: %s elements\n" %
+          (rt.run_meta["algorithm"], ds))
+    value = _read_one_int(rt)          # [value] * data_size
+    rt.typed_value = value
+
     if mode == "teaching":
         from minimpi import barrier as BarrierMod
         rt.show_ui = True
@@ -43,9 +51,6 @@ def run_demo(rt, control, params):
              "events": [e.to_dict() for e in evs]})
         rt._barrier = lambda rnd: BarrierMod.barrier(rt.comm, rnd)
         rt._on_round = lambda rnd: _show_round(rt, rnd)
-        print("\nAlgorithm: %s   Data Size: %s   World Size: %d   My value: %s\n" %
-              (rt.run_meta["algorithm"], rt.run_meta["data_size"], rt.size,
-               getattr(rt, "base", "?")))
     else:
         rt.show_ui = False
         rt._report = None
@@ -53,7 +58,13 @@ def run_demo(rt, control, params):
         rt._on_round = None
 
     try:
-        result = rt.run_algorithm(params)
+        result = rt.run_algorithm(params, value=value)
+        if result is not None and not params.get("payload"):
+            first = result[0] if isinstance(result, list) and result else result
+            print("\nResult: %s\n" % first)
+        # Do not ship multi-MB results back over the control channel — for
+        # payload benchmarks the teacher only needs completion + no errors.
+        final = None if params.get("payload") else _encode(result)
         # Do not ship multi-MB results back over the control channel — for
         # payload benchmarks the teacher only needs completion + no errors.
         final = None if params.get("payload") else _encode(result)
@@ -72,6 +83,19 @@ def _encode(value):
     return {"vec": [value]}
 
 
+def _read_one_int(rt):
+    """Each student types one integer per RUN; vector = [n] * data_size.
+    Headless (non-tty) fallback: rank + 1 so automation stays deterministic."""
+    if sys.stdin.isatty():
+        try:
+            line = input("Input one integer:\n> ").strip()
+            n = int(line)
+        except (EOFError, ValueError):
+            n = rt.rank + 1
+        return n
+    return rt.rank + 1
+
+
 def _show_round(rt, rnd):
     """Student local view for one finished logical round (teaching mode)."""
     meta = rt.run_meta
@@ -83,11 +107,11 @@ def _show_round(rt, rnd):
         print("  (this rank does not communicate this round)")
     for e in evs:
         if e.side == "send":
-            print("  SEND  %s [Rank %d] -> Rank %d    payload %s" %
-                  (rt.name, rt.rank, e.destination, fmt_bytes(e.payload_bytes)))
+            print("  Send:\n  Rank %d -> Rank %d\n  %s" %
+                  (rt.rank, e.destination, fmt_bytes(e.payload_bytes)))
         else:
-            print("  RECV  %s [Rank %d] <- Rank %d    payload %s" %
-                  (rt.name, rt.rank, e.source, fmt_bytes(e.payload_bytes)))
+            print("  Receive:\n  Rank %d <- Rank %d\n  %s" %
+                  (rt.rank, e.source, fmt_bytes(e.payload_bytes)))
     print("  (waiting for next round...)")
 
 
@@ -138,24 +162,19 @@ class WorkerShell:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--server", default="127.0.0.1:9000", help="teacher ip:port")
-    ap.add_argument("--name", default="student", help="your display name")
-    ap.add_argument("--value", type=int, default=None,
-                    help="your initial value; vector = [value] x data_size")
+    ap.add_argument("--server", default="127.0.0.1:9000", help="rank 0 ip:port")
     args = ap.parse_args()
 
     print("========================================\nMiniMPI Worker\n========================================")
     print("Connecting to coordinator (%s)..." % args.server)
 
-    rt = MiniRuntime(name=args.name)
-    rt.base = args.value
-    rt.register_with_teacher(args.server, args.name)
+    rt = MiniRuntime(name="worker")
+    rt.register_with_teacher(args.server)
     shell = WorkerShell(rt)
 
-    print("[PASS] Connected")
-    print("\nName: %s\nMy Rank: %d\nWorld Size: %d\nMy Endpoint: %s:%d\n" %
-          (args.name, rt.rank, rt.size, rt.advertise_ip, rt.transport.port))
-    print("Waiting for teacher commands...")
+    print("\nMiniMPI Worker")
+    print("Rank: %d / %d\n" % (rt.rank, rt.size))
+    print("Waiting for Rank 0...")
 
     while not shell.shutdown.wait(1.0):
         pass

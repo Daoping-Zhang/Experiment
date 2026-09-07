@@ -113,16 +113,17 @@ python3 scripts/check_env.py          # 环境自检（零第三方依赖）
 
 # 课堂：一台机器上开 teacher（交互式）
 python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
-# 学生/多终端：每个 worker 输入自己的初始数值
-python3 worker.py --server <teacher-ip>:9000 --name Alice --value 5
-python3 worker.py --server <teacher-ip>:9000 --name Bob   --value 10
-python3 worker.py --server <teacher-ip>:9000 --name Charlie --value 20
+# 学生/多终端：每个 worker（MPI 身份只有 Rank，没有名字/初始值参数；
+# 每次 RUN 时各自在终端输入一个整数）
+python3 worker.py --server <teacher-ip>:9000
 
 # Teacher 主菜单选择 Algorithm 后依次设置：
 #   Data Size（每个 rank 的向量长度；该 rank 的向量 = [学生初值] * Data Size）
 #   Mode（1 Teaching / 2 Performance）
 # 可连续换算法 / 换 Data Size / 换模式，Worker 无需重启。
-# Teacher(rank 0) 初值用 --value（默认 1），学生用 --value 各自输入。
+# Rank 0 在每次 RUN 时也输入自己的整数（菜单提示，默认 1）；
+# 学生 Worker 收到 RUN 后提示 "Input one integer:"，输入 n，
+# 实际向量 = [n] * Data Size。非交互(管道/自动化)默认 = rank+1。
 
 # 自动模式（验收 / 本地测试，不受课堂 UI 影响）
 python3 teacher.py --size 4 --demo naive_allreduce --mode teaching --auto

@@ -95,17 +95,14 @@ class Aggregator:
 
 
 class Coordinator:
-    def __init__(self, size, host, port, advertise, auto=False, value0=1):
+    def __init__(self, size, host, port, advertise, auto=False):
         self.size = size
         self.host = host
         self.port = port
         self.advertise = advertise or (host if host != "0.0.0.0" else detect_ip())
         self.auto = auto
-        self.value0 = value0          # Teacher (rank 0) initial value
 
         self.workers = {}            # rank -> control socket
-        self.names = {0: "Teacher"}  # rank -> human-readable name
-        self.bases = {}              # rank -> student initial value
         self.peers = {0: {"host": self.advertise, "port": None}}
         self.lock = threading.Lock()
         self.next_rank = 1
@@ -147,8 +144,6 @@ class Coordinator:
                 rank = self.next_rank
                 self.next_rank += 1
                 self.workers[rank] = conn
-                self.names[rank] = msg.get("name") or ("Student %d" % rank)
-                self.bases[rank] = int(msg["value"]) if msg.get("value") is not None else (rank + 1)
                 self.peers[rank] = {"host": msg["host"], "port": int(msg["port"])}
             welcome = {"t": P.C_WELCOME, "rank": rank, "size": self.size,
                        "peers": self.peers}
@@ -182,9 +177,6 @@ class Coordinator:
             agg.worker_done(rank, value=val, error=m.get("error"))
         elif t == P.C_ERROR:
             print("[ERROR from rank %d] %s" % (rank, m.get("why", "")))
-
-    def name_of(self, rank):
-        return "%s [Rank %d]" % (self.names.get(rank, "Rank %d" % rank), rank)
 
     def connectivity_check(self):
         print("\n========================================\nPeer Connectivity "
@@ -244,9 +236,7 @@ class Coordinator:
         agg.reset()
         params = dict(params, mode=mode, size=self.size)
         params["peers"] = self.peers
-        values = {r: self.bases.get(r, r + 1) for r in range(self.size)}
-        values[0] = self.value0
-        params["values"] = {str(r): v for r, v in values.items()}
+        params["value0"] = params.pop("value0", 1)
 
         print("\nRunning...")
         self.send_to_workers({"t": P.C_RUN, "params": params})
@@ -262,7 +252,8 @@ class Coordinator:
         def work():
             try:
                 rt = _Rank0Rt(self, agg)
-                result = collectives_dispatch.run(rt, params)
+                result = collectives_dispatch.run(rt, params,
+                                                  value=params.get("value0"))
                 if params.get("payload"):
                     agg.worker_done(0)   # no multi-MB result over the wire
                 else:
@@ -295,9 +286,8 @@ class Coordinator:
                 continue
             seen.add(key)
             dt = e.get("transfer_time_ms", 0)
-            print("%s -> %s    %s   %.3f ms" %
-                  (self.name_of(src), self.name_of(dst),
-                   fmt_bytes(e.get("payload_bytes", 0)), dt))
+            print("Rank %d -> Rank %d    %s   %.3f ms" %
+                  (src, dst, fmt_bytes(e.get("payload_bytes", 0)), dt))
 
     def shutdown(self):
         self.closed = True
@@ -356,7 +346,7 @@ def _fmt_value(v):
     return str(v)
 
 
-def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True):
+def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True, value0=1):
     if algo in ("tree_reduce", "tree_allreduce") and not _pow2(coord.size):
         print("[skip] %s requires a power-of-two world size (got %d)" %
               (algo, coord.size))
@@ -373,6 +363,7 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True):
         return None
 
     params = _params_for(algo, mode, payload=payload, vector_len=vector_len)
+    params["value0"] = value0
     print("\n== Demo: %s  mode=%s ==" % (algo, mode))
     if payload:
         print("payload: %s per message (op=xor, fmt=raw)" % fmt_bytes(payload))
@@ -448,8 +439,6 @@ def main():
     ap.add_argument("--payload", type=int, default=0)
     ap.add_argument("--data-size", type=int, default=0,
                     help="elements per rank (i32); menu default 16")
-    ap.add_argument("--value", type=int, default=1,
-                    help="Teacher (rank 0) initial value")
     ap.add_argument("--benchmark", action="store_true")
     args = ap.parse_args()
 
@@ -459,7 +448,7 @@ def main():
     print("========================================\nMiniMPI Classroom\n"
           "========================================")
     coord = Coordinator(args.size, args.host, args.port, args.advertise,
-                        auto=args.auto, value0=args.value)
+                        auto=args.auto)
     print("Coordinator: %s:%d" % (coord.advertise, coord.port))
     print("Rank 0: Teacher (advertised %s:%d)" % (coord.advertise,
                                                   coord.transport.port))
@@ -467,11 +456,7 @@ def main():
 
     wait_ready(coord, args.size)
     coord.connectivity_check()
-
-    def roster():
-        return ", ".join("%s [Rank %d]" % (coord.names.get(r, "?"), r)
-                         for r in range(coord.size))
-    print("Workers Ready: %d / %d   (%s)" % (args.size, args.size, roster()))
+    print("Workers Ready: %d / %d\n" % (args.size, args.size))
 
     if args.benchmark:
         run_benchmark(coord)
@@ -520,7 +505,9 @@ def main():
         print("2. Performance")
         m = input("\nSelect: ").strip()
         mode = "teaching" if m != "2" else "performance"
-        run_demo(coord, algo, mode, vector_len=ds)
+        v = input("\nYour value (Rank 0, default 1):\n> ").strip()
+        v0 = int(v) if v.isdigit() else 1
+        run_demo(coord, algo, mode, vector_len=ds, value0=v0)
 
     coord.shutdown()
     print("Bye.")

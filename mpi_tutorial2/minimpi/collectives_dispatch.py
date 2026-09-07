@@ -49,29 +49,32 @@ def _load_module(algo):
         return importlib.import_module("collectives." + algo)
 
 
-def run(rt, params):
-    """Run one collective through the MPI-compatible front-end (mpi.py).
+def run(rt, params, value=None):
+    """Run one collective over the MPI-compatible front-end.
 
-    Lifecycle mirrors MPI:
-        MPI.Init() -> comm = MPI.COMM_WORLD -> comm.allreduce(...) -> MPI.Finalize()
-    Both the teacher's rank 0 and every student worker execute this exact
-    path, so teacher/worker behavior is identical by construction.
+    `value` is the rank's OWN typed input ([typed] * data_size is built here);
+    when None we fall back to make_value (payload / legacy paths).
+
+    Both teacher rank 0 and student workers call this exact function, so the
+    collective data plane is identical for every rank. MPI.Init/Finalize are
+    SESSION scoped (worker/teacher call them once) — never per run.
     """
     from . import mpi as M
 
-    M.Init()
-    try:
+    comm = M.World(rt)
+    comm.configure(algorithm=params["algorithm"],
+                   fmt=params.get("fmt", P.FMT_INT32))
+    M.COMM_WORLD = comm
+    if value is not None:
+        vl = int(params.get("vector_len") or params.get("data_size") or 0)
+        if vl > 0 and params.get("fmt", P.FMT_INT32) != "raw":
+            value = [int(value)] * vl
+        elif params.get("fmt", P.FMT_INT32) == "raw":
+            value = make_value(params, rank=rt.rank)
+    else:
         value = make_value(params, rank=rt.rank)
-        comm = M.World(rt)
-        comm.configure(algorithm=params["algorithm"],
-                       fmt=params.get("fmt", P.FMT_INT32))
-        M.COMM_WORLD = comm
 
-        fn = getattr(_load_module(params["algorithm"]), params["algorithm"])
-        if params["algorithm"] == "ping_pong":
-            result = fn(comm, value)
-        else:
-            result = fn(comm, value, params.get("op", "sum"))
-        return result
-    finally:
-        M.Finalize()
+    fn = getattr(_load_module(params["algorithm"]), params["algorithm"])
+    if params["algorithm"] == "ping_pong":
+        return fn(comm, value)
+    return fn(comm, value, params.get("op", "sum"))
