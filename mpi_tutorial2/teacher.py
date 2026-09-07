@@ -327,9 +327,12 @@ class Coordinator:
             if key in seen:
                 continue
             seen.add(key)
-            dt = e.get("transfer_time_ms", 0)
-            print("Rank %d -> Rank %d    %s   %.3f ms" %
-                  (src, dst, fmt_bytes(e.get("payload_bytes", 0)), dt))
+            # Classroom view: WHO sends to WHOM + HOW MUCH. Single-message
+            # duration is intentionally NOT shown: transfer_time_ms may come
+            # from a send-side or a recv-side measurement and is not a strict
+            # "network time for this message" (recv duration includes waiting).
+            print("Rank %d -> Rank %d    %s" %
+                  (src, dst, fmt_bytes(e.get("payload_bytes", 0))))
 
     # ---- round timing (teacher clock; teaching pauses excluded) ---------
     def record_start(self):
