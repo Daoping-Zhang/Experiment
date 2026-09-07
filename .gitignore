@@ -14,3 +14,6 @@ __pycache__/
 # compressed archives
 *.tar.gz
 *.zip
+
+# Classroom run logs (teacher/worker outputs)
+mpi_tutorial2/classroom_logs/
