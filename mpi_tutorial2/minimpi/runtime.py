@@ -61,9 +61,12 @@ class MiniRuntime:
         self.events = EventLog()
         self.local_value = None
         # teaching-mode hooks (set by worker / teacher before a run):
-        self._report = None   # callable(rnd, round_events)  — async event upload
-        self._barrier = None  # callable(rnd)                — data-plane barrier
-        self._on_round = None # callable(rnd) — worker local per-round display
+        # teaching ranks enter the barrier FIRST (arrival ASAP); the student
+        # local view + C_ROUND_DONE upload run inside the barrier's
+        # `on_arrived` window — see worker.py's round_barrier().
+        self._barrier = None  # callable(rnd) — data-plane barrier (arrival first)
+        self._report = None   # callable(rnd, round_events) — fallback path only
+        self._on_round = None # callable(rnd) — fallback path only
         self.show_ui = False  # only the student worker renders local views
         self.run_meta = {}    # algorithm / data_size / vector_len / fmt
 
@@ -101,18 +104,18 @@ class MiniRuntime:
         """Called by collectives after finishing logical round rnd.
 
         Performance mode: label only, no barrier.
-        Teaching mode: first asynchronously upload this round's events to the
-        teacher (never blocking), then take part in a data-plane allreduce-of-1
-        barrier — rank 0 releases it manually after showing the round view.
+        Teaching mode: report barrier ARRIVAL first — a rank sends its [1]
+        the moment its algorithm work finishes, so Rank 0's gather time (=
+        Round Finished At) never includes UI printing or control-plane event
+        upload. The student local view + C_ROUND_DONE upload run inside the
+        barrier's `on_arrived` window (while the rank waits for the release);
+        worker.py wires that through `_barrier`.
         """
         if self.mode == "teaching":
-            if self.show_ui and self._on_round is not None:
-                self._on_round(rnd)          # student local view (before sync)
-            if self._report is not None:
-                self._report(rnd, self.events.by_round(rnd))
             if self._barrier is not None:
                 self._barrier(rnd)
             else:
+                # no custom barrier: keep the plain arrival/release barrier
                 from . import barrier as B
                 B.barrier(self.comm, rnd)
         return True

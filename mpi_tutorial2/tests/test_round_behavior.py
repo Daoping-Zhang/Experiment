@@ -9,6 +9,8 @@ C. Round Blocking : (covered implicitly by B; teaching rounds block until all
                     ranks finish -> barrier gather present).
 D. Performance no round barrier : sync_round is a no-op in performance mode.
 E. Tag isolation  : algorithm tag and barrier tag never cross-match.
+F. Local UI / event report timing: a slow student terminal (arrival already
+                    reported) must NOT inflate Round Finished At.
 
 Run:  python3 tests/test_round_behavior.py
 """
@@ -166,12 +168,54 @@ def test_e_tag_isolation():
     check("E. algorithm/barrier tags never cross-match", ok)
 
 
+def test_f_local_ui_does_not_enter_round_time():
+    # Arrival is reported BEFORE the student local view prints/upload runs.
+    # Slow each worker's local UI by 1.5 s per round (inside the barrier's
+    # on_arrived window, after arrival) — Round Finished At must stay tiny
+    # while the run as a whole clearly takes >= 2 rounds x 1.5 s.
+    env = dict(os.environ)
+    env["MINIMPI_LOCAL_VIEW_DELAY"] = "1.5"
+    r = Runner(4, timeout=60)
+    import subprocess
+    t_start = time.time()
+    t = r.teacher(["--auto", "--demo", "naive_allreduce", "--mode", "teaching",
+                   "--data-size", "16"])
+    time.sleep(2)
+    ws = []
+    for _ in range(3):
+        ws.append(subprocess.Popen(
+            [sys.executable, os.path.join(os.path.dirname(HERE), "worker.py"),
+             "--server", "127.0.0.1:%d" % r.port],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env))
+    deadline = time.time() + 55
+    while time.time() < deadline and t.poll() is None:
+        time.sleep(0.3)
+    timed_out = t.poll() is None
+    out = ""
+    if not timed_out:
+        out, _ = t.communicate(timeout=5)
+    elapsed = time.time() - t_start
+    r.kill()
+    m = re.search(r"Round Finished At:\s*([0-9.]+)\s*ms", out or "")
+    rms = float(m.group(1)) if m else None
+    # naive_allreduce = 2 teaching rounds; each worker's UI sleeps 1.5 s per
+    # round AFTER arrival -> run takes >= ~3 s, yet Round Finished At (gather
+    # of arrivals) stays far below 1 s. If UI ran BEFORE arrival, the first
+    # round's Round Finished At would be >= 1.5 s and this test would fail.
+    ok = (not timed_out) and (rms is not None) and rms < 1000 and \
+         elapsed >= 2.5 and "Errors:" not in (out or "")
+    check("F. slow local UI does not inflate Round Finished At", ok,
+          "RoundFinished=%.2fms elapsed=%.1fs (UI delay=1.5s x2 rounds)"
+          % (rms or -1, elapsed))
+
+
 def main():
     test_d_performance_no_round_barrier()
     test_e_tag_isolation()
     test_a_start_barrier_slow_rank()
     test_b_teaching_pause_excluded()
     test_c_teaching_rounds_block_and_finish()
+    test_f_local_ui_does_not_enter_round_time()
     print("\nRound-behavior tests: %d passed, %d failed" % (len(PASS), len(FAIL)))
     return 1 if FAIL else 0
 

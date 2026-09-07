@@ -450,11 +450,17 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True, value0=1):
     params["value0"] = value0
     print("\n== Demo: %s  mode=%s ==" % (algo, mode))
     if payload:
-        print("payload: %s per message (op=xor, fmt=raw)" % fmt_bytes(payload))
+        # Benchmark payload is LOCAL per rank: every rank holds `payload`
+        # bytes; how much a single message carries depends on the algorithm
+        # (e.g. ring sends chunks of N/P) and is shown by the round events.
+        print("Local Payload per Rank: %s  (op=xor, fmt=raw)" % fmt_bytes(payload))
     else:
         params["data_size"] = vector_len
-        print("data size: %d elements  (int32 -> %s per message)"
+        print("Data Size: %d elements  =  Local Data per Rank %s (int32)"
               % (vector_len, fmt_bytes(vector_len * P.ELEMENT_BYTES)))
+        if algo == "ring_allreduce":
+            print("  (ring: one message = one chunk = Data Size / World Size "
+                  "elements; per-message bytes shown by the events)")
     t0 = time.time()
     agg = coord.run_demo(params, mode)
     dt = time.time() - t0
@@ -492,13 +498,15 @@ def run_benchmark(coord):
     algs = ["naive_allreduce", "tree_allreduce", "ring_allreduce"]
     sizes = [8, 1024, 16 * 1024, 256 * 1024, 4 * 1024 * 1024]
     print("\n========================================\nCollective Benchmark\n"
-          "World Size: %d\n========================================" % coord.size)
-    header = "Size".ljust(10) + "".join(a.replace("_", " ").ljust(18)
-                                        for a in algs)
+          "World Size: %d\n"
+          "rows = Local Payload per Rank (bytes; each rank holds that much)\n"
+          "========================================" % coord.size)
+    header = "Local Payload".ljust(15) + "".join(a.replace("_", " ").ljust(18)
+                                                 for a in algs)
     print(header)
     print("-" * len(header))
     for sz in sizes:
-        row = str(sz).ljust(10)
+        row = str(sz).ljust(15)
         for a in algs:
             if a == "ring_allreduce" and sz % coord.size:
                 row += "n/a".ljust(18)

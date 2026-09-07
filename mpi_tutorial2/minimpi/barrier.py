@@ -20,10 +20,14 @@ would recurse through their own sync_round).
                   -> on_root_ready(rnd)      (teacher display / ENTER pause)
               send([world_size] -> every rank)
 
-So rank 0 (the teacher) only finishes the barrier after it has shown the
-global view of round r and released the class manually. Teaching pauses
-between on_root_gathered and on_root_ready are AFTER the gather time, so they
-never enter round timing. Performance mode never calls this barrier.
+Round timing is clean because the arrival is reported FIRST: a non-root sends
+its [1] the moment its algorithm work finishes, and only then (inside the
+`on_arrived` window, while it waits for the release) does it print its local
+view and upload events. So Rank 0's gather time — and therefore
+Round Finished At — never includes UI printing or control-plane event
+upload. Teacher pauses between on_root_gathered and on_root_ready happen
+AFTER the gather time, so they never enter round timing either. Performance
+mode never calls this barrier.
 
 Barrier messages use their own tag region (BARRIER_TAG_BASE + rnd) and
 kind=barrier, so they can never match — or be shown as — algorithm traffic.
@@ -33,7 +37,8 @@ from . import protocol as P
 BASE_TAG = P.BARRIER_TAG_BASE   # barrier tag = BARRIER_TAG_BASE + rnd
 
 
-def barrier(comm, rnd, on_root_gathered=None, on_root_ready=None):
+def barrier(comm, rnd, on_root_gathered=None, on_root_ready=None,
+            on_arrived=None):
     """Blocking data-plane AllReduce-of-1 barrier (MiniMPI teaching impl).
 
     Every rank contributes 1; rank 0 reduces them to world_size and
@@ -44,7 +49,11 @@ def barrier(comm, rnd, on_root_gathered=None, on_root_ready=None):
               -> on_root_gathered(rnd)   (all ranks finished this round)
               -> on_root_ready(rnd)      (teacher display / ENTER pause)
           broadcast [world_size] to every rank
-    non-root: send([1] -> root)  then  recv([world_size] <- root)
+    non-root: send([1] -> root)            <- ARRIVAL, as soon as this rank
+                                              finished its algorithm work
+              -> on_arrived(rnd)           <- UI print / event upload happen
+                                              HERE, while waiting for release
+              recv([world_size] <- root)
     """
     root = 0
     tag = BASE_TAG + rnd
@@ -67,6 +76,8 @@ def barrier(comm, rnd, on_root_gathered=None, on_root_ready=None):
     comm.send([1], dest=root, tag=tag, fmt="i32",
               algo="teaching-barrier", phase="sync-wait", rnd=rnd,
               kind=P.KIND_BARRIER)
+    if on_arrived is not None:
+        on_arrived(rnd)
     token = comm.recv(source=root, tag=tag, fmt="i32",
                       algo="teaching-barrier", phase="sync-go", rnd=rnd,
                       kind=P.KIND_BARRIER)

@@ -10,6 +10,7 @@ import os
 import socket
 import sys
 import threading
+import time
 
 from minimpi.metrics import fmt_bytes
 
@@ -46,13 +47,19 @@ def run_demo(rt, control, params):
     if mode == "teaching":
         from minimpi import barrier as BarrierMod
         rt.show_ui = True
-        rt._report = lambda rnd, evs: control.send(
-            {"t": P.C_ROUND_DONE, "rnd": rnd,
-             "events": [e.to_dict() for e in evs],
-             "send_ms": rt._snap[0] if getattr(rt, "_snap", None) else None,
-             "work_ms": rt._snap[1] if getattr(rt, "_snap", None) else None})
-        rt._barrier = lambda rnd: BarrierMod.barrier(rt.comm, rnd)
-        rt._on_round = lambda rnd: _show_round(rt, rnd)
+        rt._report = None
+        rt._on_round = None
+
+        def round_barrier(rnd):
+            # ARRIVAL first: barrier() sends this rank's [1] to rank 0 the
+            # moment its algorithm work finished. The student local view and
+            # the C_ROUND_DONE upload then run in the barrier's on_arrived
+            # window (while this rank waits for the release), so UI printing
+            # and event report never enter Round Finished At.
+            BarrierMod.barrier(rt.comm, rnd,
+                               on_arrived=lambda _r: _show_and_report(
+                                   rt, control, _r))
+        rt._barrier = round_barrier
     else:
         rt.show_ui = False
         rt._report = None
@@ -98,8 +105,25 @@ def _read_one_int(rt):
     return rt.rank + 1
 
 
+def _show_and_report(rt, control, rnd):
+    """Student side of a teaching round sync — runs INSIDE the round
+    barrier's on_arrived window: this rank already reported its arrival to
+    rank 0 (so Round Finished At is fixed), and is now waiting for the
+    release. Here it prints its local view and uploads C_ROUND_DONE."""
+    _show_round(rt, rnd)          # prints local view; sets rt._snap
+    send_ms, work_ms = rt._snap
+    control.send({"t": P.C_ROUND_DONE, "rnd": rnd,
+                  "events": [e.to_dict() for e in rt.comm.events.by_round(rnd)],
+                  "send_ms": send_ms, "work_ms": work_ms})
+
+
 def _show_round(rt, rnd):
     """Student local view for one finished logical round (teaching mode)."""
+    # test-only: artificially slow down the LOCAL UI after arrival, to prove
+    # UI printing never enters Round Finished At (see tests/test_round_behavior
+    # F). Arrival already happened — this only delays the release wait.
+    if os.environ.get("MINIMPI_LOCAL_VIEW_DELAY"):
+        time.sleep(float(os.environ["MINIMPI_LOCAL_VIEW_DELAY"]))
     meta = rt.run_meta
     alg = meta.get("algorithm", "")
     ds = meta.get("data_size", "")

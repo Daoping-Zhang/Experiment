@@ -98,7 +98,9 @@ comm.Barrier()          # Start Barrier：两种 Mode 都有（公平起点/统�
 collective（同一份算法文件）
 ```
 
-**Data Size 语义（全项目统一）**：`Data Size = N` → 每 rank 本地向量 `[value] × N`（int32 约 N×4 B）。Ring 每条消息只发 chunk（N/P），展示的是该消息真实 `payload_bytes`。
+**Data Size 语义（全项目统一）**：`Data Size = N` → 每 rank 的**本地数据** = `[value] × N`
+（int32，即 Local Data per Rank = N×4 B）。它不是单条消息大小——Ring 每条只发一个
+chunk（N/P 元素 = N/P×4 B），真实单条消息 `payload_bytes` 由通信事件展示。
 
 **两种 Mode 用完全相同的算法**：`collectives/*.py` 只有一份实现；差异只在
 `comm.sync_round(rnd)` —— Teaching=round barrier（数据面 allreduce-of-1，属于
@@ -117,7 +119,7 @@ Round 1 / Collective Time 的起点不会因为 release 的顺序而偏晚。
 
 **Timing（课堂核心 = 两个时刻）**
 - `My Send Finished At`：本 rank 本轮最后一次算法 send 完成时刻相对本轮开始（无 send 显示 `N/A`，不伪造）。学生 UI 打印完这一行后显示 `Waiting for round completion...`——"我早就发完了，但整轮要等最慢的人"。
-- `Round Finished At`：teacher 时钟上"所有 rank 完成本轮"（round barrier gather 完成）相对上一轮 release / Start Barrier 的时间。teacher ENTER/讲解属于教学暂停，发生在 gather 之后、release 之前，**不计入** round time（有测试验证）。
+- `Round Finished At`：teacher 时钟上"最后一个 rank 完成本轮算法"的时刻——即 round barrier **arrival 收齐（gather 完成）**相对上一轮 release / Start Barrier 的时间。每个 worker 一做完本轮的算法工作就立刻上报 arrival（`[1]`），**之后**才打印本地视图、上传事件；因此终端打印与 control 事件上报都不计入 Round Finished At（测试 F 用 1.5s/轮的"慢终端"验证）。teacher ENTER/讲解是 gather 之后的暂停，同样**不计入**（测试 B）。
 - 课堂直接比较 `My Send Finished 0.72 ms` vs `Round Finished 4.50 ms`，学生就能看到：自己的任务早已结束，同步要等最慢的参与者。（各 rank 的 send 时刻用各自时钟，单机/教室局域网下近似可比。）
 - advanced/debug（`MINIMPI_SHOW_WORK=1`）：`My Round Work Finished At` = 本 rank 自身时钟的本地工作结束时刻，**不是**"等待别人"的时间。
 
@@ -184,8 +186,10 @@ python3 scripts/local_demo.py --size 4 --demo tree_allreduce --mode teaching
 python3 scripts/verify.py            # 自动验收
 ```
 
-课堂演示数据约定：`Data Size = N` 表示每 rank 的向量 = **[学生初值] × N**（N 个 int32）。
-单条算法消息 payload = N × 4 B；大小显示自动转 KB/MB（如 64 B / 1 KB / 4 MB）。
+课堂演示数据约定：`Data Size = N` 表示每 rank 的**本地数据 = [学生初值] × N**（N 个 int32，
+即 **Local Data per Rank = N × 4 B**）。它**不是**单条消息的大小：每条消息携带多少
+由算法决定（Ring 每条只发一个 chunk = N/P 元素 = N/P × 4 B），真实消息大小由
+通信事件视图按 `payload_bytes` 展示。大小显示自动转 KB/MB（如 64 B / 1 KB / 4 MB）。
 最终结果只显示**一个数**（向量每个元素相等，它就是归约/AllReduce 的结果），
 不在终端打印整条大向量。barrier 同步消息不计入通信视图。
 
@@ -218,6 +222,7 @@ Message-size benchmark（8B..4MB × 三种 allreduce）
 - **Ring AllReduce 需要 payload 长度能被 world size 整除**（本仓库默认向量长度=size；README 明示）。
 - payload `op` 默认 `sum`（int 向量逐元素和）；`raw` 大消息用 `xor`（大整数按位，纯 stdlib 也快）。
 - **这不是生产 MPI**：它只为教学复现"通信模型 / 热点 / 步数 / transfer time / effective bandwidth"，不要声称性能等同真实 MPI；校园网噪声大，benchmark 不设硬性 pass/fail 阈值。
+- 环境变量 `MINIMPI_TEACH_PAUSE`（auto 模式模拟 ENTER）、`MINIMPI_INPUT_DELAY`（模拟慢输入）、`MINIMPI_LOCAL_VIEW_DELAY`（模拟慢终端）、`MINIMPI_SHOW_WORK`（debug）均为 **test-only / 自动化钩子**，课堂交互不使用它们。
 - 依赖：**Python ≥ 3.8，仅标准库**（socket/threading/struct/json/time…）。macOS/Windows/Linux 均可。
 
 ## 7. 术语对应
