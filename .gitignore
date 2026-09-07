@@ -17,3 +17,7 @@ __pycache__/
 
 # Classroom run logs (teacher/worker outputs)
 mpi_tutorial2/classroom_logs/
+
+# Teaching-view review capture artifacts (external runs)
+mpi_tutorial2/classroom_review/
+mpi_tutorial2/scripts/run.py

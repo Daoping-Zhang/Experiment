@@ -38,6 +38,16 @@ class CommunicationEvent:
         d = asdict(self)
         return d
 
+    def light_dict(self):
+        """Control-plane upload form: everything except the payload contents.
+        The teacher's GLOBAL view only needs src/dst/size/kind — payload
+        values stay local (student terminal / rank-0 local view), so they are
+        never shipped over the control channel."""
+        d = asdict(self)
+        for k in ("value_before", "received_value", "value_after"):
+            d[k] = None
+        return d
+
 
 class EventLog:
     def __init__(self):

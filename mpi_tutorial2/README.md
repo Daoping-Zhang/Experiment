@@ -118,10 +118,10 @@ AllReduce-of-1（`minimpi/barrier.py`）：每 rank 发 `[1]`，rank 0 求和 = 
 Round 1 / Collective Time 的起点不会因为 release 的顺序而偏晚。
 
 **Timing（课堂核心 = 两个时刻）**
-- `My Send Finished At`：本 rank 本轮最后一次算法 send 完成时刻相对本轮开始（无 send 显示 `N/A`，不伪造）。学生 UI 打印完这一行后显示 `Waiting for round completion...`——"我早就发完了，但整轮要等最慢的人"。
-- `Round Finished At`：teacher 时钟上"最后一个 rank 完成本轮算法"的时刻——即 round barrier **arrival 收齐（gather 完成）**相对上一轮 release / Start Barrier 的时间。每个 worker 一做完本轮的算法工作就立刻上报 arrival（`[1]`），**之后**才打印本地视图、上传事件；因此终端打印与 control 事件上报都不计入 Round Finished At（测试 F 用 1.5s/轮的"慢终端"验证）。teacher ENTER/讲解是 gather 之后的暂停，同样**不计入**（测试 B）。
-- 课堂直接比较 `My Send Finished 0.72 ms` vs `Round Finished 4.50 ms`，学生就能看到：自己的任务早已结束，同步要等最慢的参与者。（各 rank 的 send 时刻用各自时钟，单机/教室局域网下近似可比。）
-- advanced/debug（`MINIMPI_SHOW_WORK=1`）：`My Round Work Finished At` = 本 rank 自身时钟的本地工作结束时刻，**不是**"等待别人"的时间。
+- `My Send Finished`：本 rank 本轮最后一次算法 send 完成时刻相对本轮开始（无 send 显示 `N/A`，不伪造）。学生 UI 打印完本地视图后显示 `Waiting for the whole round...`——"我早就发完了，但整轮要等最慢的人"。
+- `Whole Round Finished`（teacher）：最后一个 rank 完成本轮算法的时刻——round barrier **arrival 收齐（gather 完成）**相对上一轮 release / Start Barrier 的时间。每个 worker 一做完本轮的算法工作就立刻上报 arrival（`[1]`），**之后**才打印本地视图、上传事件；因此终端打印与 control 事件上报都不计入（测试 F 用 1.5s/轮的"慢终端"验证）。teacher ENTER/讲解是 gather 之后的暂停，同样**不计入**（测试 B）。teacher 的 TIMING 只列本轮真实 Send 过的 rank（不打印满屏 N/A）。
+- 课堂直接比较 `My Send Finished 0.72 ms` vs `Whole Round Finished 4.50 ms`，学生就能看到：自己的任务早已结束，同步要等最慢的参与者。（各 rank 的 send 时刻用各自时钟，单机/教室局域网下近似可比。）
+- advanced/debug（`MINIMPI_SHOW_WORK=1`）：`My Round Work Finished` = 本 rank 自身时钟的本地工作结束时刻，**不是**"等待别人"的时间。
 
 **性能实验**：Performance Mode 不打印/不上传每轮教学事件。`Collective Time`
 从 Start Barrier"全班到齐"（rank 0 gather 完成）那一刻开始，到**所有 rank 上报
@@ -141,6 +141,7 @@ mpi_tutorial2/
 │   ├── communicator.py   # send/recv + 值编解码 + combine 内核
 │   ├── barrier.py        # teaching 同步：数据面 allreduce-of-1
 │   ├── collectives_dispatch.py# RUN → World + Start Barrier + 算法分发
+│   ├── teaching.py       # Teaching View 语义层（phase/chunk/preview/local view）
 │   ├── metrics.py        # CommunicationEvent / EventLog
 │   └── runtime.py        # rank 端身份、事件、round 同步
 ├── collectives/          # 每个算法只调 comm.send/comm.recv
@@ -154,6 +155,7 @@ mpi_tutorial2/
 │   ├── check_env.py      # Python/环境检查
 │   ├── local_demo.py     # 单机跑 teacher+workers
 │   ├── verify.py         # 自动验收（含 timeout，hang 即 FAIL）
+│   ├── run_teaching_review.py  # 一键生成 Teaching View 审核包（tar.gz）
 │   └── _proc.py          # 子进程助手
 └── tests/                # 教学单元测试
 ```
@@ -184,6 +186,7 @@ python3 teacher.py --size 4 --demo tree_allreduce --mode performance --data-size
 # 单机一把跑（真实子进程 teacher + 3 workers）
 python3 scripts/local_demo.py --size 4 --demo tree_allreduce --mode teaching
 python3 scripts/verify.py            # 自动验收
+python3 scripts/run_teaching_review.py   # 一键生成 Teaching View 审核包
 ```
 
 课堂演示数据约定：`Data Size = N` 表示每 rank 的**本地数据 = [学生初值] × N**（N 个 int32，
@@ -209,7 +212,29 @@ Tree Reduce / Tree AllReduce（log(P) 轮，减热点）
 Message-size benchmark（8B..4MB × 三种 allreduce）
 ```
 
-**Teaching Mode** 每轮结束：全班在数据面 barrier 汇合 → teacher 打印该轮全局通信视图 → 按 ENTER → 放行下一轮。学生终端各自显示自己的 local view：收发、payload、`My Send Finished At`、然后 `Waiting for round completion...`；teacher 端给出该轮的 `Round Finished At`。**Performance Mode** 无人工同步，跑完给出 `Collective Time`（Start Barrier 到齐 → 全体完成）与 `Session wall time`。
+**Teaching Mode（Teaching View 最终形态）**：每轮结束全班在数据面 barrier 汇合。
+每次 RUN 前 Start Barrier 可见（学生："Local data ready / Entering MPI Barrier..."，
+teacher 打印 Start Barrier 块、ENTER 后开跑）。每轮固定结构：
+
+- Teacher 四段视图：① 轮 Header（Algorithm / Phase / Round x/y）② `GLOBAL
+  COMMUNICATION`（只显示 `谁→谁 + 数据量`，Ring 带 `Chunk k`；不显示其它 rank 的
+  完整数据；`OPERATIONS` 汇总每 rank 的收包运算 +SUM/+COPY）③ `RANK 0 LOCAL VIEW`
+  （teacher = 真实 rank 0，用**真实执行数据**展示 Before/Send/Receive/Operation/
+  After）④ `TIMING`（只列本轮真实 Send 的 rank + `Whole Round Finished`）+ Teacher
+  Control（ENTER 控制下一轮）。
+- 学生本地视图：Algorithm / Phase / Round x/y / Rank / `My Role`（Sender /
+  Receiver / +Reduce / +Copy / 明确 `Idle`）/ BEFORE / SEND / RECEIVE /
+  OPERATION / AFTER / TIMING（`My Send Finished`，无 send = N/A）/
+  `Waiting for the whole round...`。payload 都是**真实收发数据**，vector 预览
+  ≤8 元素。
+- Phase 语义由 presentation 层给出：Tree AllReduce P=4 → Round 1-2 `Phase 1:
+  Reduce`、Round 3-4 `Phase 2: Broadcast`；Ring P=4 → 6 轮：3×`Reduce-Scatter`
+  （SUM）+ 3×`AllGather`（COPY，不显示 SUM）。
+- 结束时 `Collective Complete`：AllReduce → `Result: 10` + "All ranks received
+  the same reduced result."；Reduce → 只 root 拥有结果。
+
+**Performance Mode** 无人工同步、不打印任何教学 state，跑完给出 `Collective Time`
+（Start Barrier 到齐 → 全体完成）与 `Session wall time`。
 
 ## 5. 协议速览
 

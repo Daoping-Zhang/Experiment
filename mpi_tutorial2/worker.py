@@ -12,11 +12,10 @@ import sys
 import threading
 import time
 
-from minimpi.metrics import fmt_bytes
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from minimpi import protocol as P  # noqa: E402
+from minimpi import teaching as T  # noqa: E402
 from minimpi.runtime import MiniRuntime  # noqa: E402
 
 
@@ -50,6 +49,19 @@ def run_demo(rt, control, params):
         rt._report = None
         rt._on_round = None
 
+        # Per-run local-semantics state (real events + real initial data).
+        alg = rt.run_meta["algorithm"]
+        ds = int(rt.run_meta["data_size"] or rt.run_meta.get("vector_len") or 0)
+        if ds > 0 and rt.run_meta.get("fmt") == "i32":
+            initial = [value] * ds
+        else:
+            initial = [value]
+        rt._local_ctx = T.RoundCtx(alg, rt.size, rt.rank, initial)
+
+        # Start Barrier is about to run inside run_algorithm() -> show it.
+        print("\nLocal data ready.\n\nEntering MPI Barrier...\n"
+              "Waiting for all ranks...")
+
         def round_barrier(rnd):
             # ARRIVAL first: barrier() sends this rank's [1] to rank 0 the
             # moment its algorithm work finished. The student local view and
@@ -65,12 +77,16 @@ def run_demo(rt, control, params):
         rt._report = None
         rt._barrier = None
         rt._on_round = None
+        rt._local_ctx = None
 
     try:
         result = rt.run_algorithm(params, value=value)
         if result is not None and not params.get("payload"):
             first = result[0] if isinstance(result, list) and result else result
-            print("\nResult: %s\n" % first)
+            if mode == "teaching":
+                _print_final(rt, params, result, first)
+            else:
+                print("\nResult: %s\n" % first)
         # Do not ship multi-MB results back over the control channel — for
         # payload benchmarks the teacher only needs completion + no errors.
         final = None if params.get("payload") else _encode(result)
@@ -105,6 +121,30 @@ def _read_one_int(rt):
     return rt.rank + 1
 
 
+def _print_final(rt, params, result, first):
+    """Student-side 'Collective Complete' block (teaching mode)."""
+    alg = params.get("algorithm", "")
+    allreduce = alg in ("naive_allreduce", "tree_allreduce", "ring_allreduce")
+    print("\n========================================")
+    print("Collective Complete")
+    print("========================================")
+    print("\nResult:")
+    if isinstance(result, list) and result:
+        print(T.preview_vector(result))
+        print("Summary: %s" % first)
+        if allreduce:
+            print("\nAll elements have the same value.")
+            print("Every rank received the same reduced result.")
+        elif rt.rank == 0:
+            print("\nRank 0 (root) owns the final reduced result.")
+        else:
+            print("\nThis rank is not the root.")
+            print("Its local data is not the global Reduce result.")
+    elif result is not None:
+        print(str(result))
+    print()
+
+
 def _show_and_report(rt, control, rnd):
     """Student side of a teaching round sync — runs INSIDE the round
     barrier's on_arrived window: this rank already reported its arrival to
@@ -113,12 +153,17 @@ def _show_and_report(rt, control, rnd):
     _show_round(rt, rnd)          # prints local view; sets rt._snap
     send_ms, work_ms = rt._snap
     control.send({"t": P.C_ROUND_DONE, "rnd": rnd,
-                  "events": [e.to_dict() for e in rt.comm.events.by_round(rnd)],
+                  "events": [e.light_dict()
+                             for e in rt.comm.events.by_round(rnd)],
                   "send_ms": send_ms, "work_ms": work_ms})
 
 
 def _show_round(rt, rnd):
-    """Student local view for one finished logical round (teaching mode)."""
+    """Student local view for one finished logical round (teaching mode).
+
+    Structure (spec §12-§14): Algorithm / Phase / Round x / y / Rank,
+    My Role, BEFORE, SEND, RECEIVE, OPERATION, AFTER, TIMING.
+    """
     # test-only: artificially slow down the LOCAL UI after arrival, to prove
     # UI printing never enters Round Finished At (see tests/test_round_behavior
     # F). Arrival already happened — this only delays the release wait.
@@ -126,29 +171,27 @@ def _show_round(rt, rnd):
         time.sleep(float(os.environ["MINIMPI_LOCAL_VIEW_DELAY"]))
     meta = rt.run_meta
     alg = meta.get("algorithm", "")
-    ds = meta.get("data_size", "")
     evs = [e for e in rt.comm.events.by_round(rnd) if e.kind == "algorithm"]
-    print("\nRound %d    (algorithm: %s, data size: %s)" % (rnd, alg, ds))
-    if not evs:
-        print("  (this rank does not communicate this round)")
-    for e in evs:
-        if e.side == "send":
-            print("  Send:\n  Rank %d -> Rank %d\n  %s" %
-                  (rt.rank, e.destination, fmt_bytes(e.payload_bytes)))
-        else:
-            print("  Receive:\n  Rank %d <- Rank %d\n  %s" %
-                  (rt.rank, e.source, fmt_bytes(e.payload_bytes)))
+    ctx = getattr(rt, "_local_ctx", None)
+    if ctx is None:                       # safety: rebuild if unavailable
+        ds = int(meta.get("data_size") or 0)
+        base = getattr(rt, "typed_value", rt.rank + 1)
+        ctx = T.RoundCtx(alg, rt.size, rt.rank, [base] * (ds or 1))
+        rt._local_ctx = ctx
+    view = T.describe_round(ctx, rnd, evs)
+    lines = [T.local_view_text(view)]
     send_ms, work_ms = rt.comm_world.snapshot_ms()
     rt._snap = (send_ms, work_ms)      # uploaded with C_ROUND_DONE (teacher)
     send_txt = "N/A" if send_ms is None else "%.2f ms" % send_ms
-    print("\nMy Send Finished At: %s" % send_txt)
+    lines.append("\nTIMING")
+    lines.append("My Send Finished: %s" % send_txt)
     # Debug/advanced only — NOT a "sync wait": it is this rank's own-clock
     # local work finish (no teacher clock, no other ranks involved).
     if os.environ.get("MINIMPI_SHOW_WORK"):
         work_txt = "N/A" if work_ms is None else "%.2f ms" % work_ms
-        print("My Round Work Finished At: %s   (this rank's own clock)"
-              % work_txt)
-    print("\nWaiting for round completion...")
+        lines.append("My Round Work Finished: %s   (own clock)" % work_txt)
+    lines.append("\nWaiting for the whole round...")
+    print("\n" + "\n".join(lines))
 
 
 class WorkerShell:

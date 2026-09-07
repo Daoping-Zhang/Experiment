@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from minimpi import protocol as P, collectives_dispatch  # noqa: E402
 from minimpi import barrier as BarrierMod                # noqa: E402
+from minimpi import teaching as T                        # noqa: E402
 from minimpi.transport import PeerTransport             # noqa: E402
 from minimpi.communicator import Communicator           # noqa: E402
 from minimpi.metrics import EventLog, fmt_bytes, now_ns      # noqa: E402
@@ -250,6 +251,17 @@ class Coordinator:
         params["value0"] = params.pop("value0", 1)
 
         print("\nRunning...")
+        # Rank-0 (teacher) per-run teaching state: real initial data + a
+        # per-round semantic context, so the Rank 0 Local View shows the
+        # teacher's ACTUAL local data, not a UI-side mock.
+        self.rank0._alg = params.get("algorithm", "")
+        self.rank0._local_ctx = None
+        if mode == "teaching":
+            ds = int(params.get("data_size") or params.get("vector_len") or 0)
+            if params.get("fmt", "i32") == "i32" and ds > 0:
+                v0 = int(params.get("value0", 1))
+                self.rank0._local_ctx = T.RoundCtx(self.rank0._alg, self.size,
+                                                   0, [v0] * ds)
         self.send_to_workers({"t": P.C_RUN, "params": params})
         self._start_rank0(agg, params)
         if not agg.wait_all_done(timeout=600):
@@ -280,59 +292,98 @@ class Coordinator:
         threading.Thread(target=work, daemon=True).start()
 
     def on_round_ready(self, agg, rnd):
-        """Rank-0 barrier leg: show the global view of round rnd + timing,
-        then let the class proceed (ENTER). The gather time is already fixed
-        before this pause, so ENTER never enters round timing."""
+        """Rank-0 barrier leg after every rank arrived (Round Finished At is
+        already fixed by record_gather). Shows the fixed 4-part teaching view,
+        then pauses and releases:
+
+            1. Global Communication     2. Rank 0 Local View
+            3. Timing                   4. Teacher Control
+        """
         agg.wait_round_events(rnd, need=self.size - 1, timeout=30)
-        # teaching-barrier traffic is kind="barrier" and hidden; only the
-        # collective's real algorithm communication is shown.
+        alg = getattr(self.rank0, "_alg", "")
+        P = self.size
+        total = T.total_rounds(alg, P)
+
+        # ---- round header (Algorithm / Phase / Round x / y) ---------------
+        phase_label, _op = T.phase_of(alg, P, rnd)
+        print("\n" + "=" * 50)
+        print(T.pretty_algorithm(alg))
+        print(phase_label)
+        print("Round %d / %d" % (rnd, total))
+        print("=" * 50)
+
+        # ---- 1. Global Communication --------------------------------------
         remote = [e for e in agg.round_events.get(rnd, [])
                   if e.get("kind") != "barrier"]
-        local = [e.to_dict() for e in self.events0.by_round(rnd)
+        local = [e.light_dict() for e in self.events0.by_round(rnd)
                  if e.kind != "barrier"]
-        self._print_round(rnd, remote + local)
-
-        # ---- Timing (Audit 7/8/10) ------------------------------------
-        print("\nTiming")
-        timing = agg.timing.get(rnd, {})
-        # Rank 0 (teacher) timings from its own World snapshot
-        if self.rank0.comm_world is not None:
-            send0, _work0 = self.rank0.comm_world.snapshot_ms()
-            timing.setdefault(0, {"send": send0})
-        for rk in range(self.size):
-            t = timing.get(rk)
-            send = None if t is None else t.get("send")
-            send_txt = "N/A" if send is None else "%.2f ms" % send
-            print("  Rank %d send finished %s" % (rk, send_txt))
-        rms = self.round_ms(rnd)
-        print("Round Finished At: %s" %
-              ("%.2f ms" % rms if rms is not None else "N/A"))
-        print("  (compare My Send Finished At per rank vs the round total)")
-        print("\nAll ranks completed Round %d." % rnd)
-
-        import os as _os, time as _time
-        if not self.auto:
-            input("\nPress ENTER for next round.")
-        elif _os.environ.get("MINIMPI_TEACH_PAUSE"):
-            _time.sleep(float(_os.environ["MINIMPI_TEACH_PAUSE"]))
-        # gather time was fixed BEFORE the pause, so round timing excludes it
-        self.record_release(rnd)   # baseline for the NEXT round (after pause)
-
-    def _print_round(self, rnd, events):
-        print("\n--------------- Round %d ----------------" % rnd)
+        events = remote + local
+        print("\nGLOBAL COMMUNICATION")
         seen = set()
         for e in events:
             src, dst = e.get("source"), e.get("destination")
-            key = (src, dst)
-            if key in seen:
+            if (src, dst) in seen:
                 continue
-            seen.add(key)
-            # Classroom view: WHO sends to WHOM + HOW MUCH. Single-message
-            # duration is intentionally NOT shown: transfer_time_ms may come
-            # from a send-side or a recv-side measurement and is not a strict
-            # "network time for this message" (recv duration includes waiting).
-            print("Rank %d -> Rank %d    %s" %
-                  (src, dst, fmt_bytes(e.get("payload_bytes", 0))))
+            seen.add((src, dst))
+            line = "Rank %d -> Rank %d" % (src, dst)
+            if alg == "ring_allreduce":
+                chunk = T.ring_chunk_index(src, P, rnd, "send")
+                line += "    Chunk %d" % chunk
+            line += "    %s" % fmt_bytes(e.get("payload_bytes", 0))
+            print(line)
+
+        # ---- OPERATIONS (data-changing receives; no vector dumps) ---------
+        ops_by = {}
+        for e in events:
+            if e.get("side") == "recv":
+                ops_by.setdefault(e.get("destination"), []).append(e.get("source"))
+        print("\nOPERATIONS")
+        if not ops_by:
+            print("None")
+        else:
+            _lbl, op = T.phase_of(alg, P, rnd)
+            opl = "+ SUM" if op == "sum" else ("+ COPY" if op == "copy" else "")
+            for rk in sorted(ops_by):
+                who = " (Teacher)" if rk == 0 else ""
+                peers = ", ".join(str(p) for p in sorted(set(ops_by[rk])))
+                print("Rank %d%s: Recv from %s %s" % (rk, who, peers, opl))
+
+        # ---- 2. Rank 0 Local View (real rank-0 execution state) -----------
+        print("\nRANK 0 LOCAL VIEW")
+        ctx = getattr(self.rank0, "_local_ctx", None)
+        evs0 = [e for e in self.events0.by_round(rnd) if e.kind == "algorithm"]
+        if ctx is None:
+            print("(scalar/payload run — no vector state to show)")
+        else:
+            view = T.describe_round(ctx, rnd, evs0)
+            print(T.local_view_text(view))
+
+        # ---- 3. Timing (only ranks that really sent this round) -----------
+        senders = {e.get("source") for e in events if e.get("side") == "send"}
+        timing = agg.timing.get(rnd, {})
+        if 0 in senders and self.rank0.comm_world is not None:
+            send0, _w0 = self.rank0.comm_world.snapshot_ms()
+            timing.setdefault(0, {"send": send0})
+        print("\nTIMING")
+        for rk in sorted(senders):
+            t = timing.get(rk)
+            send = None if t is None else t.get("send")
+            txt = "N/A" if send is None else "%.2f ms" % send
+            print("Rank %d send finished: %s" % (rk, txt))
+        rms = self.round_ms(rnd)
+        print("\nWhole Round Finished: %s" %
+              ("%.2f ms" % rms if rms is not None else "N/A"))
+
+        # ---- 4. Teacher Control -------------------------------------------
+        last = rnd >= total
+        print("\nAll ranks finished Round %d / %d." % (rnd, total))
+        if not self.auto:
+            input("\n[ENTER] %s" % ("Close Collective" if last
+                                    else "Next Round"))
+        elif os.environ.get("MINIMPI_TEACH_PAUSE"):
+            time.sleep(float(os.environ["MINIMPI_TEACH_PAUSE"]))
+        # gather time was fixed BEFORE the pause, so round timing excludes it
+        self.record_release(rnd)   # baseline for the NEXT round (after pause)
 
     # ---- round timing (teacher clock; teaching pauses excluded) ---------
     def record_start(self):
@@ -392,13 +443,31 @@ class _Rank0Rt:
         self.comm = coord.comm0
         self.comm_world = None           # MPI.COMM_WORLD (set once)
         # Start Barrier fires this when every rank has ARRIVED (gather done,
-        # before rank 0 sends the release broadcast) — record_start() then
-        # happens exactly at "all ranks ready", never late.
-        self.on_start_gathered = lambda rnd: coord.record_start()
+        # before rank 0 sends the release broadcast). Teaching mode: make the
+        # barrier visible, let the teacher ENTER, THEN record_start() — so the
+        # pause never enters Round 1 / Collective Time.
+        self.on_start_gathered = self._on_start_gathered
         self.events = coord.events0
         self.mode = "performance"
         self._coord = coord
         self._agg = None                 # current RUN aggregator
+        self._alg = ""                   # current RUN algorithm
+        self._local_ctx = None           # per-run RoundCtx (rank-0 local view)
+
+    def _on_start_gathered(self, rnd):
+        """All ranks have arrived at the Start Barrier (release not sent)."""
+        coord = self._coord
+        if self.mode == "teaching":
+            print("\n" + "=" * 50)
+            print("Start Barrier")
+            print("=" * 50)
+            print("\nWaiting for all ranks...")
+            print("\nAll ranks ready.")
+            if not coord.auto:
+                input("\n[ENTER] Start Collective")
+            elif os.environ.get("MINIMPI_TEACH_PAUSE"):
+                time.sleep(float(os.environ["MINIMPI_TEACH_PAUSE"]))
+        coord.record_start()              # baseline AFTER any teacher pause
 
     def sync_round(self, rnd):
         if self.mode == "teaching":
@@ -468,20 +537,48 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True, value0=1):
     agg = coord.run_demo(params, mode)
     dt = time.time() - t0
     if show and agg:
-        cms = coord.collective_ms()
-        print("\nCollective complete.")
-        print("  Collective Time: %s  (Start Barrier complete -> all ranks done)"
-              % ("%.2f ms" % cms if cms is not None else "N/A"))
-        print("  Session wall time: %.3f s  (incl. student input / control / UI)"
-              % dt)
-        for r in sorted(agg.results):
-            print("  Rank %d final = %s" % (r, _fmt_value(agg.results[r])))
-        if algo in ("naive_reduce", "tree_reduce"):
-            print("\n(note) %s: only Rank 0 (root) received the reduced result; "
-                  "other ranks keep their own local values." % algo)
+        if mode == "teaching" and not payload:
+            # per-rank final is a SINGLE number (never a vector dump)
+            for r in sorted(agg.results):
+                print("Rank %d final = %s" % (r, _fmt_value(agg.results[r])))
+            _print_teaching_complete(agg, algo)
+        else:
+            cms = coord.collective_ms()
+            print("\nCollective complete.")
+            print("  Collective Time: %s  (Start Barrier complete -> all ranks done)"
+                  % ("%.2f ms" % cms if cms is not None else "N/A"))
+            print("  Session wall time: %.3f s  (incl. student input / control / UI)"
+                  % dt)
+            for r in sorted(agg.results):
+                print("  Rank %d final = %s" % (r, _fmt_value(agg.results[r])))
     if agg and agg.errors:
         print("Errors:", agg.errors)
     return agg
+
+
+def _print_teaching_complete(agg, algo):
+    """Teacher-side 'Collective Complete' block (teaching mode, §21)."""
+    reduce_only = algo in ("naive_reduce", "tree_reduce")
+    r0 = agg.results.get(0)
+    print("\n" + "=" * 50)
+    print("Collective Complete")
+    print("=" * 50)
+    if reduce_only:
+        print("\nReduce Result")
+        print("Rank 0 (root): %s" % _fmt_value(r0))
+        print("Only the root owns the final reduced result.")
+    elif r0 is not None:
+        first = r0[0] if isinstance(r0, list) and r0 else r0
+        print("\nResult: %s" % first)
+        finals = {(v[0] if isinstance(v, list) and v else v)
+                  for r, v in agg.results.items() if v is not None}
+        if len(finals) == 1:
+            print("All ranks received the same reduced result.")
+        else:
+            print("(per-rank finals: %s)"
+                  % ", ".join("r%d=%s" % (r, _fmt_value(v))
+                              for r, v in sorted(agg.results.items())))
+    print()
 
 
 MENU = [
@@ -557,6 +654,12 @@ def main():
         print("Coordinator: %s:%d" % (coord.advertise, coord.port))
         print("Rank 0: Teacher (a real collective participant)")
         print("Expected World Size: %d" % args.size)
+        print("\nTeacher Role")
+        print("-" * 40)
+        print("Classroom Coordinator")
+        print("Global Communication View")
+        print("MPI Participant: Rank 0")
+        print("-" * 40)
 
         wait_ready(coord, args.size)
         coord.connectivity_check()
