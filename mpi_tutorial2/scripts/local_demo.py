@@ -6,7 +6,7 @@ so the full classroom path can be developed, CI-tested and rehearsed without
 needing real machines.
 
 Usage:
-    python3 scripts/local_demo.py --size 4 --demo tree_allreduce --mode teaching
+    python3 scripts/local_demo.py --size 4 --demo recursive_doubling_allreduce --mode teaching
     python3 scripts/local_demo.py --size 4 --demo naive_reduce --mode performance
     python3 scripts/local_demo.py --size 8 --demo tree_reduce
 """

@@ -16,7 +16,7 @@ Naive / Tree / Ring collectives
 ## 1. 为什么值得看这个实现
 
 - **两层分离**：Control Plane（学生 ↔ teacher：join/rank/peer 表/算法选择/指标收集）与 Data Plane（worker ↔ worker 的 TCP 帧）互不混淆；collective payload 从不经过 coordinator。
-- **全部 collective 只用 `send/recv`**：`naive_reduce/allreduce`、`tree_reduce/allreduce`（二项树）、`ring_allreduce`（reduce-scatter + allgather）。
+- **全部 collective 只用 `send/recv`**：`naive_reduce/allreduce`、`tree_reduce`（二项树）、`recursive_doubling_allreduce`（log2(P) 轮双向交换）、`ring_allreduce`（reduce-scatter + allgather）。
 - **Teaching / Performance 用同一套代码**，唯一差别是每轮结束后的同步点：
   - Teaching：每轮结束人人参与一个**数据面 Barrier = AllReduce-of-1**：每 rank 贡献 `[1]`，rank 0 求和得到 `world_size` 再广播回去——每个 rank 拿到 `world_size` 即"全班到齐"；rank 0 收齐后打印全局视图、按 ENTER 才放行下一轮。每次 RUN 前的 Start Barrier（`comm.Barrier()`）同理。
   - Performance：无 barrier，rank 连续执行，round 只是日志标签。
@@ -86,7 +86,7 @@ teacher.py  worker.py  minimpi/  scripts/  tests/
 
 **RUN spec（只含三个核心字段）**
 ```python
-run = {"algorithm": "tree_allreduce", "data_size": 1024, "mode": "teaching"}
+run = {"algorithm": "recursive_doubling_allreduce", "data_size": 1024, "mode": "teaching"}
 ```
 
 **每次 RUN 的统一流程**
@@ -117,21 +117,21 @@ AllReduce-of-1（`minimpi/barrier.py`）：每 rank 发 `[1]`，rank 0 求和 = 
 再广播。rank 0 在"全班到齐（gather 完成）之后、广播 release 之前"打时间戳，所以
 Round 1 / Collective Time 的起点不会因为 release 的顺序而偏晚。
 
-**Timing（同步模型：两个时钟域，各回答各的问题）**
-- **Student — Local Clock（本 rank 自己的时钟，ms 相对自己的 Round Start）**：`TIMING — Local Clock` 显示本轮真实发生的事件完成时刻——`Send / Receive / SUM / COPY / Local Work Completed At`。时刻都在**真实操作处**记录（`send()/recv()` 返回、collective 中真实 `combine()`/copy 之后的一行 `comm.note_operation_complete("sum"/"copy")`、`sync_round()` 进入 barrier 前 = Local Work Completed）。UI 打印与事件上传在 barrier arrival **之后**进行，永远不进 timing boundary。仅用于理解"我什么时候收到 → 什么时候算完 → 什么时候完成本轮"。
-- **Teacher — Rank 0 Observation（只有 Rank 0 一只时钟）**：每轮 barrier 每个 rank 的 token 到达 Rank 0 的时刻（transport 收到时盖 Rank 0 时钟）+ Rank 0 自己完成本地工作的时刻：
+**Timing（两个时钟域，各回答各的问题）**
+- **Student — LOCAL TIMELINE（本 rank 自己的时钟，ms 相对自己的 Round Start）**：显示本轮真实发生的事件完成时刻——`Send / Receive / SUM / COPY Completed`，全部是**累计偏移**（`+0.19 ms` = 该事件在 Round Start 后 0.19 ms 完成），**不是 duration、绝不相加**；本 rank 本轮唯一的本地总工作时间只有一行 `Local Work Total`。时刻都在**真实操作处**记录（`send()/recv()` 返回、collective 中真实 `combine()`/copy 之后的一行 `comm.note_operation_complete("sum"/"copy")`、`sync_round()` 进入 barrier 前 = Local Work Total）。UI 打印与事件上传在 barrier arrival **之后**进行，永远不进 timing boundary。
+- **Teacher — SYNCHRONIZATION — Rank 0 Observation（只有 Rank 0 一只时钟）**：每轮 barrier 每个 rank 的 token 到达 Rank 0 的时刻（transport 收到时盖 Rank 0 时钟）+ Rank 0 自己完成本地工作的时刻；全部以第一个到达者归零：
 
   ```
-  TIMING — Rank 0 Observation
-  Rank 0 ready at:  3.84 ms | wait for others:  0.00 ms
-  Rank 1 ready at:  0.46 ms | wait for others:  3.38 ms
+  SYNCHRONIZATION — Rank 0 Observation
+  Rank 1 arrived: +0.00 ms | waited 3.38 ms
+  Rank 0 arrived: +0.09 ms | waited 3.29 ms
   ...
-  Whole Round Finished: 3.84 ms
+  Synchronization Window: 3.38 ms
   ```
 
-  `Rank Ready At` 的定义是"Rank 0 观察到该 rank 到达本轮同步点"（含极小的 token 传输），**不是**"精确完成于某时刻"。wait = Whole − ready 只在同一只 Rank 0 时钟内成立（测试 N/O 验证；慢 rank 人为延迟 1s → ready 晚 ~1s、其它三人 wait ~1s）。
-- 跨时钟**不做差值**：不计算 `TeacherReady − StudentLocalWork`。
-- 无 Send/无 op 的轮次对应行显示 `N/A`（不伪造）；不再是 send-vs-round 那套解释。
+  `arrived` 的定义是"Rank 0 观察到该 rank 到达本轮同步点"（含极小的 token 传输），**不是**"精确完成于某时刻"。`Synchronization Window = 最后到达 − 最先到达`，只回答"各 rank 完成得多不整齐"，**不代表整轮算法耗时**（已删除 `Whole Round Finished`）。测试 N/O 验证：慢 rank 人为延迟 1s → window ≈1s、其它人 waited ≈1s。
+- 跨时钟**不做差值**：不计算 `TeacherArrival − StudentLocalWork`。
+- 无 Send/无 op 的轮次对应行不显示（不伪造）；真实性能只由 Performance Benchmark 测量。
 
 **性能实验**：Performance Mode 不打印/不上传每轮教学事件。`Collective Time`
 从 Start Barrier"全班到齐"（rank 0 gather 完成）那一刻开始，到**所有 rank 上报
@@ -160,7 +160,7 @@ mpi_tutorial2/
 │   ├── naive_reduce.py   # all-to-one -> root
 │   ├── naive_allreduce.py# all-to-one + one-to-all（baseline）
 │   ├── tree_reduce.py    # 二项树 reduce（power-of-two）
-│   ├── tree_allreduce.py # tree reduce + 反向广播
+│   ├── recursive_doubling_allreduce.py # tree reduce + 反向广播
 │   └── ring_allreduce.py # reduce-scatter + allgather
 ├── scripts/
 │   ├── check_env.py      # Python/环境检查
@@ -192,10 +192,10 @@ python3 worker.py --server <teacher-ip>:9000
 
 # 自动模式（验收 / 本地测试，不受课堂 UI 影响）
 python3 teacher.py --size 4 --demo naive_allreduce --mode teaching --auto
-python3 teacher.py --size 4 --demo tree_allreduce --mode performance --data-size 16
+python3 teacher.py --size 4 --demo recursive_doubling_allreduce --mode performance --data-size 16
 
 # 单机一把跑（真实子进程 teacher + 3 workers）
-python3 scripts/local_demo.py --size 4 --demo tree_allreduce --mode teaching
+python3 scripts/local_demo.py --size 4 --demo recursive_doubling_allreduce --mode teaching
 python3 scripts/verify.py            # 自动验收
 python3 scripts/run_teaching_review.py   # 一键生成 Teaching View 审核包
 ```
@@ -216,7 +216,9 @@ All-to-One            -> Naive Reduce（root 热点）
    ↓
 All-to-One + One-to-All -> Naive AllReduce（baseline）
    ↓
-Tree Reduce / Tree AllReduce（log(P) 轮，减热点）
+Tree Reduce（log(P) 轮，减热点）
+   ↓
+Recursive Doubling AllReduce（log2(P) 轮，每轮双向 Exchange + Reduce）
    ↓
 大消息 → Ring AllReduce（reduce-scatter + allgather，每轮只收发 N/P）
    ↓
@@ -228,23 +230,23 @@ Message-size benchmark（8B..4MB × 三种 allreduce）
 teacher 打印 Start Barrier 块、ENTER 后开跑）。每轮固定结构：
 
 - Teacher 四段视图：① 轮 Header（Algorithm / Phase / Round x/y）② `GLOBAL
-  COMMUNICATION`（只显示 `谁→谁 + 数据量`，Ring 带 `Chunk k`；不显示其它 rank 的
-  完整数据；`OPERATIONS` 汇总每 rank 的收包运算 +SUM/+COPY）③ `RANK 0 LOCAL VIEW`
-  （teacher = 真实 rank 0，用**真实执行数据**展示 Before/Send/Receive/Operation/
-  After + 自己的 Local Clock 行）④ `TIMING — Rank 0 Observation`（同一只 Rank 0
-  时钟：每 rank `ready at` + `wait for others` + `Whole Round Finished`）+ Teacher
-  Control（ENTER 控制下一轮）。
+  COMMUNICATION`（只显示 `谁→谁 + 数据量`，Ring 带 `Chunk k`，Recursive
+  Doubling 用 `Rank a ⇄ Rank b ... each direction`；不显示其它 rank 的完整
+  数据；`OPERATIONS` 汇总每 rank 的运算 Exchange+SUM / +SUM / +COPY）③
+  `RANK 0 LOCAL VIEW`（teacher = 真实 rank 0，真实 Before/Send/Receive/
+  Operation/After + 自己的 `LOCAL TIMELINE`）④ `SYNCHRONIZATION — Rank 0
+  Observation`（arrived/window）+ Teacher Control（ENTER 控制下一轮）。
 - 学生本地视图：Algorithm / Phase / Round x/y / Rank / `My Role`（Sender /
-  Receiver / +Reduce / +Copy / 明确 `Idle`）/ BEFORE / SEND / RECEIVE /
-  OPERATION / AFTER / `TIMING — Local Clock`（Send/Receive/SUM/COPY/Local Work
-  Completed At，各自本 rank 时钟）/ `Waiting at round synchronization...`。
-  payload 都是**真实收发数据**，vector 预览 ≤8 元素。
+  Receiver / +Reduce / +Copy / 明确 `Idle`；Recursive Doubling 每轮都是
+  `Sender + Receiver + Reduce`）/ BEFORE / SEND / RECEIVE / OPERATION /
+  AFTER / `LOCAL TIMELINE` + `Local Work Total` / `Waiting at round
+  synchronization...`。payload 都是**真实收发数据**，vector 预览 ≤8 元素。
 - collectives 允许一行教学 annotation：真实 `combine()`/copy 之后紧跟
   `comm.note_operation_complete("sum"/"copy")`（只加观测、不改算法、不改变
   Send/Recv/Round/Partner/数据），学生读起来反而更清楚操作何时完成。
-- Phase 语义由 presentation 层给出：Tree AllReduce P=4 → Round 1-2 `Phase 1:
-  Reduce`、Round 3-4 `Phase 2: Broadcast`；Ring P=4 → 6 轮：3×`Reduce-Scatter`
-  （SUM）+ 3×`AllGather`（COPY，不显示 SUM）。
+- Phase 语义由 presentation 层给出：Recursive Doubling AllReduce P=4 → 只 2 轮，
+  每轮 `Phase: Exchange + Reduce`（双向交换 + SUM，无 Idle/无 Broadcast）；Ring
+  P=4 → 6 轮：3×`Reduce-Scatter`（SUM）+ 3×`AllGather`（COPY，不显示 SUM）。
 - 结束时 `Collective Complete`：AllReduce → `Result: 10` + "All ranks received
   the same reduced result."；Reduce → 只 root 拥有结果。
 
@@ -258,7 +260,7 @@ teacher 打印 Start Barrier 块、ENTER 后开跑）。每轮固定结构：
 
 ## 6. 限制与边界（README 声明的教学边界）
 
-- **Tree Reduce / Tree AllReduce 需要 power-of-two world size**（代码会明确报错）。
+- **Tree Reduce / Recursive Doubling AllReduce 需要 power-of-two world size**（代码会明确报错；RD 为 log2(P) 轮双向交换）。
 - **Ring AllReduce 需要 payload 长度能被 world size 整除**（本仓库默认向量长度=size；README 明示）。
 - payload `op` 默认 `sum`（int 向量逐元素和）；`raw` 大消息用 `xor`（大整数按位，纯 stdlib 也快）。
 - **这不是生产 MPI**：它只为教学复现"通信模型 / 热点 / 步数 / transfer time / effective bandwidth"，不要声称性能等同真实 MPI；校园网噪声大，benchmark 不设硬性 pass/fail 阈值。

@@ -2,7 +2,7 @@
 
 params keys:
   algorithm : ping_pong|naive_reduce|naive_allreduce|tree_reduce|
-              tree_allreduce|ring_allreduce
+              recursive_doubling_allreduce|ring_allreduce
   mode      : teaching|performance
   op        : sum|xor
   fmt       : i32|f64|raw

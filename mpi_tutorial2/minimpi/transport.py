@@ -84,6 +84,19 @@ class PeerTransport:
                 pass
 
     # ------------------------------------------------------------------ send
+    def warm_to(self, ranks):
+        """Open (and cache) the persistent outbound TCP connections that the
+        data plane will actually reuse — no message is sent, no event, no
+        timing. Call once after peers are known to avoid cold starts."""
+        for rk in sorted(ranks):
+            if rk == self.rank or rk not in self.peers:
+                continue
+            host, port = self.peers[rk]
+            try:
+                self._get_out(rk, host, port)
+            except OSError:
+                pass
+
     def send_to(self, rank, header, payload):
         """Send one frame to a peer (lazily connects and caches the socket)."""
         host, port = self.peers[rank]

@@ -42,17 +42,17 @@ def check(name, ok, extra=""):
 
 
 READY_RE = re.compile(
-    r"Rank (\d+) ready at:\s+([0-9.]+) ms \| wait for others:\s+([0-9.]+) ms")
-WHOLE_RE = re.compile(r"Whole Round Finished:\s*([0-9.]+)\s*ms")
+    r"Rank (\d+) arrived: \+?([0-9.]+) ms \| waited ([0-9.]+) ms")
+WINDOW_RE = re.compile(r"Synchronization Window:\s*([0-9.]+)\s*ms")
 
 
 def parse_ready_block(log):
     """Parse the FIRST 'TIMING — Rank 0 Observation' block only (a run may
     have several rounds -> several blocks)."""
-    i = log.find("TIMING — Rank 0 Observation")
+    i = log.find("SYNCHRONIZATION — Rank 0 Observation")
     if i < 0:
         return [], None
-    j = log.find("Whole Round Finished:", i)
+    j = log.find("Synchronization Window:", i)
     seg = log[i:j + 60 if j >= 0 else len(log)]
     rows, whole = [], None
     for ln in seg.splitlines():
@@ -60,7 +60,7 @@ def parse_ready_block(log):
         if m:
             rows.append((int(m.group(1)), float(m.group(2)),
                          float(m.group(3))))
-        m2 = WHOLE_RE.search(ln)
+        m2 = WINDOW_RE.search(ln)
         if m2 and whole is None:
             whole = float(m2.group(1))
     return rows, whole
@@ -151,27 +151,29 @@ def test_m_real_operation_completion():
 
 def test_n_same_clock_sync_waiting():
     t_out, _ = _spawn_demo("naive_allreduce", "teaching")
-    rows, whole = parse_ready_block(t_out)
-    ok = len(rows) == 4 and whole is not None
+    rows, window = parse_ready_block(t_out)
+    ok = len(rows) == 4 and window is not None
     if ok:
-        ready = {rk: m for rk, m, _ in rows}
-        mx = max(ready.values())
-        last_rank = [rk for rk, m in ready.items() if abs(m - mx) < 1e-6]
+        offs = [m for _, m, _ in rows]
+        # first arrival is +0.00 ms; last arrival waits ~0; every rank's
+        # waited == window - offset (same rank-0 clock)
+        ok = min(offs) < 0.05
         for rk, m, wait in rows:
-            if abs(wait - max(0.0, mx - m)) > 0.15:
+            if abs(wait - max(0.0, window - m)) > 0.15 or wait < 0:
                 ok = False
-        ok = ok and abs(whole - mx) < 0.15 and len(last_rank) >= 1 and \
-            min(rows, key=lambda x: -x[1])[2] < 0.15
-    check("N. same-clock ready table (whole==max ready, wait==whole-ready)",
-          ok, "rows=%d whole=%s" % (len(rows), whole))
+        ok = ok and abs(max(offs) - window) < 0.15
+        last_row = max(rows, key=lambda x: x[1])
+        ok = ok and last_row[2] < 0.15
+    check("N. same-clock sync window (window==last-first, wait==window-offset)",
+          ok, "rows=%d window=%s" % (len(rows), window))
 
 
 def test_o_slow_rank_synchronization():
     slow_env = {"MINIMPI_LOCAL_WORK_DELAY": "1.0"}
     t_out, _ = _spawn_demo("naive_allreduce", "teaching",
                            env_workers=[slow_env, {}, {}], timeout=150)
-    rows, whole = parse_ready_block(t_out)
-    ok = whole is not None and whole >= 900.0
+    rows, window = parse_ready_block(t_out)
+    ok = window is not None and window >= 900.0
     slow = [rk for rk, m, w in rows if m >= 900.0]
     ok = ok and len(slow) == 1
     others = [(rk, m, w) for rk, m, w in rows if m < 900.0]
@@ -179,13 +181,13 @@ def test_o_slow_rank_synchronization():
     if rows:
         slow_wait = dict((rk, w) for rk, _, w in rows).get(slow[0], 999)
         ok = ok and slow_wait < 150.0
-    check("O. slow rank observed ready last; others wait ~1 s",
-          ok, "whole=%.0f slow=%s" % (whole or -1, slow))
+    check("O. slow rank arrives ~1 s later; window ~1 s",
+          ok, "window=%.0f slow=%s" % (window or -1, slow))
 
 
 def test_q_sequential_runs_one_session():
     r = Runner(4, timeout=180)
-    script = "5\n16\n2\n\n"        # menu: Tree AllReduce, DS16, performance
+    script = "5\n16\n2\n\n"        # menu: Recursive Doubling AllReduce, DS16, performance
     script += "6\n16\n2\n\n"       # menu: Ring AllReduce, DS16, performance
     script += "9\n"                # exit
     t = subprocess.Popen(
@@ -206,10 +208,10 @@ def test_q_sequential_runs_one_session():
     except subprocess.TimeoutExpired:
         t.kill()
         t_out, _ = t.communicate()
-    timed = "Demo: tree_allreduce" not in t_out
+    timed = "Demo: recursive_doubling_allreduce" not in t_out
     r.kill()
     w_out = [w.communicate(timeout=5)[0] for w in workers]
-    i_tree = t_out.find("Demo: tree_allreduce")
+    i_tree = t_out.find("Demo: recursive_doubling_allreduce")
     i_ring = t_out.find("Demo: ring_allreduce")
     ok = (not timed) and i_tree >= 0 and i_ring > i_tree and \
          "Bye." in t_out and all("Result: 10" in o for o in w_out) and \

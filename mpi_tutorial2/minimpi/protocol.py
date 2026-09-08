@@ -23,7 +23,7 @@ ANY_TAG = -1
 #   ALGO_TAG_BASE   : upper bound of the algorithm tag region. Every collective
 #                     module owns ONE small dedicated channel tag below it
 #                     (ping_pong=0, naive_reduce=101, naive_allreduce=201,
-#                     tree_reduce=301, tree_allreduce=401, ring_allreduce=501),
+#                     tree_reduce=301, recursive_doubling_allreduce=401, ring_allreduce=501),
 #                     so within one run messages of different algorithms can
 #                     never be confused.
 #   BARRIER_TAG_BASE: teaching sync / start-barrier messages begin here;

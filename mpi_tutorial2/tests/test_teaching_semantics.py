@@ -67,9 +67,11 @@ def _between(text, start_marker, end_marker):
 # --------------------------------------------------------------------------
 def test_units():
     from minimpi import teaching as T
-    ok1 = T.total_rounds("tree_allreduce", 4) == 4
-    ok2 = T.phase_of("tree_allreduce", 4, 1)[0] == "Phase 1: Reduce" and \
-          T.phase_of("tree_allreduce", 4, 3)[0] == "Phase 2: Broadcast"
+    ok1 = T.total_rounds("recursive_doubling_allreduce", 4) == 2  # log2(4)
+    ok2 = T.phase_of("recursive_doubling_allreduce", 4, 1)[0] == \
+        "Phase: Exchange + Reduce" and \
+        T.phase_of("recursive_doubling_allreduce", 4, 2)[0] == \
+        "Phase: Exchange + Reduce"
     ok3 = T.phase_of("ring_allreduce", 4, 2)[0] == "Phase 1: Reduce-Scatter" and \
           T.phase_of("ring_allreduce", 4, 4)[0] == "Phase 2: AllGather"
     ok4 = T.ring_chunk_index(0, 4, 1, "send") == 0 and \
@@ -78,34 +80,29 @@ def test_units():
     check("unit. phase/chunk mapping", ok1 and ok2 and ok3 and ok4)
 
 
-def test_g_tree_local_semantics():
-    t_out, _ = _run_teaching_demo("tree_allreduce")
-    # rank-0 local view, round 1: BEFORE [1,1,1,1], RECEIVE [2,2,2,2], AFTER
-    # [3,3,3,3] — from the REAL execution of round 1 (1 -> 0).
-    sec = _between(t_out, "RANK 0 LOCAL VIEW", "TIMING")
-    ok = ("My Role: Receiver + Reduce" in sec
+def test_g_rd_local_semantics():
+    t_out, _ = _run_teaching_demo("recursive_doubling_allreduce")
+    # rank-0 local view, round 1: BEFORE [1,1,1,1], exchange with rank 1:
+    # send + receive [2,2,2,2], SUM -> AFTER [3,3,3,3] (real execution).
+    sec = _between(t_out, "RANK 0 LOCAL VIEW", "LOCAL TIMELINE")
+    ok = ("My Role: Sender + Receiver + Reduce" in sec
           and "[1, 1, 1, 1]" in sec
           and "[2, 2, 2, 2]" in sec
           and "[3, 3, 3, 3]" in sec
           and "[1, 1, 1, 1] + [2, 2, 2, 2] = [3, 3, 3, 3]" in sec)
-    check("G. tree rank0 BEFORE/Receive/AFTER real semantics", ok)
+    check("G. recursive doubling rank0 exchange semantics (1<->2 -> 3)", ok)
 
 
-def test_h_tree_phase_labels():
-    t_out, _ = _run_teaching_demo("tree_allreduce")
-    seq = ["Phase 1: Reduce\nRound 1 / 4",
-           "Phase 1: Reduce\nRound 2 / 4",
-           "Phase 2: Broadcast\nRound 3 / 4",
-           "Phase 2: Broadcast\nRound 4 / 4"]
-    pos = -1
-    ok = True
-    for s in seq:
-        i = t_out.find(s)
-        if i < 0 or i < pos:
-            ok = False
-            break
-        pos = i
-    check("H. tree phase labels Reduce/Reduce/Broadcast/Broadcast", ok)
+def test_h_rd_two_rounds_no_broadcast():
+    t_out, _ = _run_teaching_demo("recursive_doubling_allreduce")
+    # P=4 -> exactly 2 exchange rounds; no Reduce/Broadcast two-phase labels
+    first = t_out.find("Phase: Exchange + Reduce\nRound 1 / 2")
+    second = t_out.find("Phase: Exchange + Reduce\nRound 2 / 2")
+    ok = first >= 0 and second > first
+    ok = ok and "Phase 1: Reduce" not in t_out and "Phase 2: Broadcast" \
+        not in t_out and "My Role: Idle" not in t_out
+    check("H. RD: 2 rounds, every round Exchange + Reduce, no idle/broadcast",
+          ok)
 
 
 def test_i_ring_phase_and_chunk():
@@ -170,8 +167,8 @@ def test_k_performance_unaffected():
 
 def main():
     test_units()
-    test_g_tree_local_semantics()
-    test_h_tree_phase_labels()
+    test_g_rd_local_semantics()
+    test_h_rd_two_rounds_no_broadcast()
     test_j_rank0_real_participant()
     test_i_ring_phase_and_chunk()
     test_k_performance_unaffected()

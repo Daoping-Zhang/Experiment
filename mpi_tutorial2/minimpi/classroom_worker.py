@@ -27,6 +27,10 @@ class RunSpec:
     params: dict
 
     @property
+    def kind(self):
+        return self.params.get("kind", "run")
+
+    @property
     def algorithm(self):
         return self.params.get("algorithm", "")
 
@@ -38,6 +42,10 @@ class RunSpec:
     def data_size(self):
         return int(self.params.get("data_size")
                    or self.params.get("vector_len") or 0)
+
+    @property
+    def payload(self):
+        return int(self.params.get("payload") or 0)
 
     @property
     def fmt(self):
@@ -66,6 +74,8 @@ class ClassroomWorker:
         self._rt = None
         self._q = None
         self._reader = None
+        self._benchmark_value = None
+        self._benchmark_announced = False
 
     # ------------------------------------------------------------------ API
     @property
@@ -79,8 +89,24 @@ class ClassroomWorker:
         spec = self._q.get()
         return spec
 
+    def benchmark_value(self):
+        """Value typed once at Performance Benchmark setup; None outside a
+        benchmark session."""
+        return self._benchmark_value
+
+    def set_benchmark_value(self, v):
+        self._benchmark_value = v
+        self._benchmark_announced = False
+
+    def benchmark_announced(self):
+        return self._benchmark_announced
+
+    def mark_benchmark_announced(self):
+        self._benchmark_announced = True
+
     def close(self):
         self._rt = None
+        self._benchmark_value = None
 
     # ------------------------------------------------------------- control
     def _read_loop(self):

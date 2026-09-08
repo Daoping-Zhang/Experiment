@@ -6,10 +6,10 @@ Scenarios (each with a timeout; any hang == FAIL):
   2. in-process: tag matching + 4 MB payload over real TCP transports
   3. naive_reduce      (4 ranks, performance)  root correct
   4. naive_allreduce   (4 ranks, performance)  every rank correct
-  5. tree_allreduce    (4 ranks, performance)  every rank correct
+  5. recursive_doubling_allreduce    (4 ranks, performance)  every rank correct
   6. ring_allreduce    (4 ranks, performance)  every rank correct
   7. naive_allreduce   (4 ranks, teaching)     finishes with correct result
-  8. tree_allreduce    (4 ranks, teaching)     finishes with correct result
+  8. recursive_doubling_allreduce    (4 ranks, teaching)     finishes with correct result
   9. large payload     (4 ranks, 4 MB naive_allreduce) completes
  10. clean shutdown (teacher exits; children reaped)
 """
@@ -47,7 +47,7 @@ def scenario_imports():
         import minimpi.runtime
         import minimpi.collectives_dispatch
         for m in ("ping_pong", "naive_reduce", "naive_allreduce",
-                  "tree_reduce", "tree_allreduce", "ring_allreduce"):
+                  "tree_reduce", "recursive_doubling_allreduce", "ring_allreduce"):
             __import__("collectives." + m)
         check("imports", True)
     except Exception as e:  # noqa: BLE001
@@ -128,10 +128,10 @@ def main():
     e2e("naive_reduce perf", "naive_reduce", "performance", "10",
         expected_root="10")
     e2e("naive_allreduce perf", "naive_allreduce", "performance", EXPECTED)
-    e2e("tree_allreduce perf", "tree_allreduce", "performance", EXPECTED)
+    e2e("recursive_doubling_allreduce perf", "recursive_doubling_allreduce", "performance", EXPECTED)
     e2e("ring_allreduce perf", "ring_allreduce", "performance", EXPECTED)
     e2e("naive_allreduce teaching", "naive_allreduce", "teaching", EXPECTED)
-    e2e("tree_allreduce teaching", "tree_allreduce", "teaching", EXPECTED)
+    e2e("recursive_doubling_allreduce teaching", "recursive_doubling_allreduce", "teaching", EXPECTED)
     e2e("ring_allreduce teaching", "ring_allreduce", "teaching", EXPECTED)
     e2e("naive_allreduce size8", "naive_allreduce", "performance",
         "36", size=8)

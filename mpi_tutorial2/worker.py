@@ -63,21 +63,48 @@ def run_classroom(comm):
                 print("[shutdown]")
                 return
 
-            value = read_one_integer(comm.Get_rank())
-            data = [value] * run.data_size
+            # Performance Benchmark session setup: ONE input, all later cases
+            # reuse that value — no per-case prompts, no zero Data Size.
+            if run.kind == "benchmark_setup":
+                print("\n========================================\n"
+                      "Performance Benchmark Setup\n"
+                      "========================================")
+                print("\nThis value will be reused for all benchmark cases.")
+                classroom.set_benchmark_value(read_one_integer(comm.Get_rank()))
+                print("\nBenchmark value: %s\n" % classroom.benchmark_value())
+                continue
 
-            print("\nAlgorithm: %s\nData Size: %d elements\n"
-                  % (run.algorithm, run.data_size))
-            if run.mode == "teaching":
-                print("Local data ready.\n\nEntering MPI Barrier...\n"
-                      "Waiting for all ranks...")
+            if run.kind == "benchmark_case":
+                value = classroom.benchmark_value()
+                if value is None:                # safety: never re-prompt
+                    value = comm.Get_rank() + 1
+                if not classroom.benchmark_announced():
+                    print("\nPerformance Benchmark Running...\n\n"
+                          "Local benchmark value: %s\n\nPlease wait." % value)
+                    classroom.mark_benchmark_announced()
+            else:
+                value = read_one_integer(comm.Get_rank())
+
+            data = None if run.payload else [value] * run.data_size
+
+            if run.kind != "benchmark_case":
+                if run.data_size > 0:
+                    print("\nAlgorithm: %s\nData Size: %d elements\n"
+                          % (run.algorithm, run.data_size))
+                else:
+                    print("\nAlgorithm: %s\nLocal Payload per Rank: %d B\n"
+                          % (run.algorithm, run.payload))
+                if run.mode == "teaching":
+                    print("Local data ready.\n\nEntering MPI Barrier...\n"
+                          "Waiting for all ranks...")
 
             comm.Barrier()               # Start Barrier (both modes): the
                                          # collective only starts when every
                                          # rank is ready
 
             result = run_one_collective(classroom, run, data)
-            show_result(comm.Get_rank(), run, result)
+            if run.kind != "benchmark_case":
+                show_result(comm.Get_rank(), run, result)
     finally:
         classroom.close()
 
@@ -191,7 +218,7 @@ def show_result(rank, run, result):
 def _print_final(rank, run, result, first):
     """Student-side 'Collective Complete' block (teaching mode)."""
     alg = run.algorithm
-    allreduce = alg in ("naive_allreduce", "tree_allreduce", "ring_allreduce")
+    allreduce = alg in ("naive_allreduce", "recursive_doubling_allreduce", "ring_allreduce")
     print("\n========================================")
     print("Collective Complete")
     print("========================================")
@@ -248,8 +275,8 @@ def _show_round(rt, rnd):
     view = T.describe_round(ctx, rnd, evs)
     lines = [T.local_view_text(view)]
     # Local Clock: every value on THIS rank's own clock, ms from Round Start
-    lines.append("\nTIMING — Local Clock")
-    lines.extend(T.local_clock_text(rt.comm_world.local_timings()))
+    lines.append("\nLOCAL TIMELINE")
+    lines.extend(T.local_timeline_text(rt.comm_world.local_timings()))
     lines.append("\nWaiting at round synchronization...")
     print("\n" + "\n".join(lines))
 

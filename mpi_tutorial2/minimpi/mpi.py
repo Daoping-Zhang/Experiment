@@ -19,7 +19,7 @@ mpi4py / MPI:
     MPI_Bcast/Scatter/Gather...              (Tutorial 3 territory)
 
 Teaching extras (also via comm.*): naive_reduce / naive_allreduce /
-tree_reduce / tree_allreduce / ring_allreduce.
+tree_reduce / recursive_doubling_allreduce / ring_allreduce.
 
 Lifecycle note: each process owns ONE MPI session — worker.py calls
 MPI.Init(server=...) once (which connects/joins the world and builds
@@ -257,8 +257,8 @@ class World:
     def tree_reduce(self, value, op=SUM, root=0):
         return _col().tree_reduce.tree_reduce(self, value, op, root=root)
 
-    def tree_allreduce(self, value, op=SUM):
-        return _col().tree_allreduce.tree_allreduce(self, value, op)
+    def recursive_doubling_allreduce(self, value, op=SUM):
+        return _col().recursive_doubling_allreduce.recursive_doubling_allreduce(self, value, op)
 
     def ring_allreduce(self, value, op=SUM):
         return _col().ring_allreduce.ring_allreduce(self, value, op)

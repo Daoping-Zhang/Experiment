@@ -33,7 +33,7 @@ def test_imports():
     import collectives.naive_reduce
     import collectives.naive_allreduce
     import collectives.tree_reduce
-    import collectives.tree_allreduce
+    import collectives.recursive_doubling_allreduce
     import collectives.ring_allreduce
     ok("imports", True)
 

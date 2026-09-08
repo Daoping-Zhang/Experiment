@@ -102,7 +102,7 @@ def test_b_teaching_pause_excluded():
             out, _ = t.communicate(timeout=5)
         elapsed = time.time() - t_start
         r.kill()
-        m = re.search(r"Whole Round Finished:\s*([0-9.]+)\s*ms", out or "")
+        m = re.search(r"Synchronization Window:\s*([0-9.]+)\s*ms", out or "")
         rms = float(m.group(1)) if m else None
         # naive_allreduce = 2 teaching rounds x 2 s teacher pause -> the run
         # must really have taken >= ~3.5 s, while the displayed Round time
@@ -118,7 +118,7 @@ def test_b_teaching_pause_excluded():
 
 def test_c_teaching_rounds_block_and_finish():
     r = Runner(4, timeout=90)
-    log, ok, timed = r.run_demo(["--auto", "--demo", "tree_allreduce",
+    log, ok, timed = r.run_demo(["--auto", "--demo", "recursive_doubling_allreduce",
                                  "--mode", "teaching", "--data-size", "16"])
     r.close()
     rounds = len(re.findall(r"^Round \d+ / \d+$", log, re.M))
@@ -153,7 +153,7 @@ def test_e_tag_isolation():
     b.set_peers(1, {0: (a.host, a.port)})
 
     def send():
-        # real project tags: tree_allreduce algorithm channel = 401,
+        # real project tags: recursive_doubling_allreduce algorithm channel = 401,
         # round-1 teaching barrier = BARRIER_TAG_BASE(7000) + 1
         a.send_to(1, {"tag": 401}, b"ALGO")     # algorithm tag
         a.send_to(1, {"tag": 7001}, b"BARR")    # barrier tag
@@ -196,7 +196,7 @@ def test_f_local_ui_does_not_enter_round_time():
         out, _ = t.communicate(timeout=5)
     elapsed = time.time() - t_start
     r.kill()
-    m = re.search(r"Whole Round Finished:\s*([0-9.]+)\s*ms", out or "")
+    m = re.search(r"Synchronization Window:\s*([0-9.]+)\s*ms", out or "")
     rms = float(m.group(1)) if m else None
     # naive_allreduce = 2 teaching rounds; each worker's UI sleeps 1.5 s per
     # round AFTER arrival -> run takes >= ~3 s, yet Round Finished At (gather

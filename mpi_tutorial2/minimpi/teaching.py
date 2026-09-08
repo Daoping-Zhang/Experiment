@@ -27,17 +27,15 @@ def pretty_algorithm(alg):
         "naive_reduce": "Naive Reduce",
         "naive_allreduce": "Naive AllReduce",
         "tree_reduce": "Tree Reduce",
-        "tree_allreduce": "Tree AllReduce",
+        "recursive_doubling_allreduce": "Recursive Doubling AllReduce",
         "ring_allreduce": "Ring AllReduce",
     }.get(alg, alg)
 
 
 def total_rounds(algorithm, P):
     """How many teaching rounds one run of `algorithm` has (per rank)."""
-    if algorithm == "tree_reduce":
-        return P.bit_length() - 1
-    if algorithm == "tree_allreduce":
-        return 2 * (P.bit_length() - 1)
+    if algorithm in ("tree_reduce", "recursive_doubling_allreduce"):
+        return P.bit_length() - 1          # log2(P) rounds
     if algorithm == "ring_allreduce":
         return 2 * (P - 1) if P >= 2 else 0
     if algorithm == "naive_allreduce":
@@ -60,13 +58,11 @@ def phase_of(algorithm, P, rnd):
     if algorithm == "naive_allreduce":
         return ("Phase 1: Reduce to Root" if rnd == 1
                 else "Phase 2: Broadcast Result"), ("sum" if rnd == 1 else "copy")
-    L = P.bit_length() - 1
+    if algorithm == "recursive_doubling_allreduce":
+        # every round is a pairwise exchange + SUM — no broadcast, no idle
+        return "Phase: Exchange + Reduce", "sum"
     if algorithm == "tree_reduce":
         return "Phase: Tree Reduce", "sum"
-    if algorithm == "tree_allreduce":
-        if rnd <= L:
-            return "Phase 1: Reduce", "sum"
-        return "Phase 2: Broadcast", "copy"
     if algorithm == "ring_allreduce":
         if rnd <= P - 1:
             return "Phase 1: Reduce-Scatter", "sum"
@@ -347,28 +343,32 @@ def _msg_line(title, msgs, direction):
     return lines
 
 
-def local_clock_text(timings):
-    """Render the local-clock Completed-At lines (student + rank-0 shared).
+def local_timeline_text(timings):
+    """Render the LOCAL TIMELINE block (student + rank-0 shared).
 
-    All values are ms from this rank's own Round Start; None = that event
-    did not happen this round. Never labelled as network/CPU duration.
+    Every value is an ABSOLUTE offset from this rank's own Round Start
+    ('+0.19 ms' = the event completed 0.19 ms after Round Start). These are
+    NOT durations and must never be added together; the rank's total local
+    work for the round is the single value Local Work Total.
     """
-    lines = []
-
-    def line(label, v):
-        lines.append("%-26s%s" % (label, "N/A" if v is None
-                                  else "%.2f ms" % v))
-    line("Send Completed At:", timings.get("send"))
-    line("Receive Completed At:", timings.get("recv"))
+    lines = ["Round Start                0.00 ms"]
+    evs = []
+    if timings.get("send") is not None:
+        evs.append(("Send Completed", timings["send"]))
+    if timings.get("recv") is not None:
+        evs.append(("Receive Completed", timings["recv"]))
     if timings.get("op") is not None:
         kind = timings.get("op_kind", "")
-        if kind == "sum":
-            line("SUM Completed At:", timings["op"])
-        elif kind == "copy":
-            line("COPY Completed At:", timings["op"])
-        else:
-            line("Operation Completed At:", timings["op"])
-    line("Local Work Completed At:", timings.get("work"))
+        label = ("SUM Completed" if kind == "sum"
+                 else "COPY Completed" if kind == "copy"
+                 else "Operation Completed")
+        evs.append((label, timings["op"]))
+    for label, v in sorted(evs, key=lambda kv: kv[1]):   # chronological
+        lines.append("%-28s+%.2f ms" % (label, v))
+    lines.append("")
+    work = timings.get("work")
+    lines.append("Local Work Total: %.2f ms" % (work if work is not None
+                                                else 0.0))
     return lines
 
 

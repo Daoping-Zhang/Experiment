@@ -96,6 +96,7 @@ class MiniRuntime:
         self.size = int(welcome["size"])
         peers = {int(k): (v["host"], v["port"]) for k, v in welcome["peers"].items()}
         self.transport.set_peers(self.rank, peers)
+        self.transport.warm_to(peers.keys())   # real persistent sockets, no msg
         self.comm.rank = self.rank
         self.comm.size = self.size
         return welcome

@@ -13,7 +13,7 @@ round's global view and (interactively) the class presses ENTER.
 Usage:
     python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
     python3 teacher.py --size 8 --benchmark
-    python3 teacher.py --size 4 --demo tree_allreduce --mode teaching --auto
+    python3 teacher.py --size 4 --demo recursive_doubling_allreduce --mode teaching --auto
 """
 import argparse
 import base64
@@ -320,34 +320,69 @@ class Coordinator:
                  if e.kind != "barrier"]
         events = remote + local
         print("\nGLOBAL COMMUNICATION")
-        seen = set()
-        for e in events:
-            src, dst = e.get("source"), e.get("destination")
-            if (src, dst) in seen:
-                continue
-            seen.add((src, dst))
-            line = "Rank %d -> Rank %d" % (src, dst)
-            if alg == "ring_allreduce":
-                chunk = T.ring_chunk_index(src, P, rnd, "send")
-                line += "    Chunk %d" % chunk
-            line += "    %s" % fmt_bytes(e.get("payload_bytes", 0))
-            print(line)
-
-        # ---- OPERATIONS (data-changing receives; no vector dumps) ---------
-        ops_by = {}
-        for e in events:
-            if e.get("side") == "recv":
-                ops_by.setdefault(e.get("destination"), []).append(e.get("source"))
-        print("\nOPERATIONS")
-        if not ops_by:
-            print("None")
+        if alg == "recursive_doubling_allreduce":
+            # pairwise exchange: show "a ⇄ b" when both directions happened
+            edges = {(e.get("source"), e.get("destination")): e
+                     for e in events}
+            printed = set()
+            for (a, b) in sorted(edges):
+                if (a, b) in printed:
+                    continue
+                if (b, a) in edges:
+                    line = "Rank %d \u21c4 Rank %d    %s each direction" % (
+                        min(a, b), max(a, b),
+                        fmt_bytes(edges[(a, b)].get("payload_bytes", 0)))
+                    printed.add((a, b)); printed.add((b, a))
+                else:
+                    line = "Rank %d -> Rank %d    %s" % (
+                        a, b, fmt_bytes(edges[(a, b)].get("payload_bytes", 0)))
+                    printed.add((a, b))
+                print(line)
         else:
-            _lbl, op = T.phase_of(alg, P, rnd)
-            opl = "+ SUM" if op == "sum" else ("+ COPY" if op == "copy" else "")
-            for rk in sorted(ops_by):
+            seen = set()
+            for e in events:
+                src, dst = e.get("source"), e.get("destination")
+                if (src, dst) in seen:
+                    continue
+                seen.add((src, dst))
+                line = "Rank %d -> Rank %d" % (src, dst)
+                if alg == "ring_allreduce":
+                    chunk = T.ring_chunk_index(src, P, rnd, "send")
+                    line += "    Chunk %d" % chunk
+                line += "    %s" % fmt_bytes(e.get("payload_bytes", 0))
+                print(line)
+
+        # ---- OPERATIONS (data-changing operations; no vector dumps) -------
+        print("\nOPERATIONS")
+        if alg == "recursive_doubling_allreduce":
+            partners = {}
+            for e in events:
+                if e.get("side") == "send":
+                    partners.setdefault(e.get("source"), set()).add(
+                        e.get("destination"))
+                elif e.get("side") == "recv":
+                    partners.setdefault(e.get("destination"), set()).add(
+                        e.get("source"))
+            for rk in sorted(partners):
                 who = " (Teacher)" if rk == 0 else ""
-                peers = ", ".join(str(p) for p in sorted(set(ops_by[rk])))
-                print("Rank %d%s: Recv from %s %s" % (rk, who, peers, opl))
+                p = ", ".join(str(x) for x in sorted(partners[rk]))
+                print("Rank %d%s: Exchange with %s + SUM" % (rk, who, p))
+        else:
+            ops_by = {}
+            for e in events:
+                if e.get("side") == "recv":
+                    ops_by.setdefault(e.get("destination"),
+                                      []).append(e.get("source"))
+            if not ops_by:
+                print("None")
+            else:
+                _lbl, op = T.phase_of(alg, P, rnd)
+                opl = ("+ SUM" if op == "sum"
+                       else "+ COPY" if op == "copy" else "")
+                for rk in sorted(ops_by):
+                    who = " (Teacher)" if rk == 0 else ""
+                    peers = ", ".join(str(p) for p in sorted(set(ops_by[rk])))
+                    print("Rank %d%s: Recv from %s %s" % (rk, who, peers, opl))
 
         # ---- 2. Rank 0 Local View (real rank-0 execution state) -----------
         print("\nRANK 0 LOCAL VIEW")
@@ -359,24 +394,30 @@ class Coordinator:
             view = T.describe_round(ctx, rnd, evs0)
             print(T.local_view_text(view))
         if self.rank0.comm_world is not None:
-            lines = T.local_clock_text(self.rank0.comm_world.local_timings())
+            lines = T.local_timeline_text(self.rank0.comm_world.local_timings())
             if lines:
-                print("\n" + "\n".join(lines))
+                print("\nLOCAL TIMELINE\n" + "\n".join(lines))
 
-        # ---- 3. Timing: Rank-0 single-clock barrier-arrival model ---------
-        # Rank Ready At = when Rank 0 observed each rank reach this round's
-        # synchronization point (its barrier token arriving at rank 0), all
-        # measured on THE SAME teacher clock. Remote arrivals include a tiny
-        # token transmission, so we say "ready at / observed", never
-        # "finished exactly at".
-        rows = self.ready_table(rnd)
-        whole = max((m for _, m, _ in rows), default=None)
-        print("\nTIMING — Rank 0 Observation")
-        for rk, m, wait in rows:
-            print("Rank %d ready at: %8.2f ms | wait for others: %7.2f ms"
-                  % (rk, m, wait))
-        print("\nWhole Round Finished: %s" %
-              ("%.2f ms" % whole if whole is not None else "N/A"))
+        # ---- 3. Synchronization Window (Rank-0 single clock) ---------------
+        # Arrivals are stamped on the ONE rank-0 clock when each rank's
+        # barrier token reached rank 0 (tiny token transmission included).
+        # We only report how UNEVEN the arrivals were: first-to-arrive is
+        # +0.00 ms, each other rank's offset is from that first arrival, and
+        # waited = window - offset. No 'whole round finished' claim — that
+        # mixes baselines (release/scheduling/token observation) with the
+        # student local clocks.
+        rd = (self._timing.get("ready", {}).get(rnd) or {})
+        if len(rd) >= 2:
+            first = min(rd.values())
+            last = max(rd.values())
+            window = (last - first) / 1e6
+            print("\nSYNCHRONIZATION — Rank 0 Observation")
+            for rk, ns in sorted(rd.items(), key=lambda kv: kv[1]):
+                off = (ns - first) / 1e6
+                wait = (last - ns) / 1e6
+                print("Rank %d arrived: +%.2f ms | waited %.2f ms"
+                      % (rk, off, wait))
+            print("\nSynchronization Window: %.2f ms" % window)
 
         # ---- 4. Teacher Control -------------------------------------------
         last = rnd >= total
@@ -562,8 +603,13 @@ def _fmt_value(v):
     return str(v)
 
 
-def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True, value0=1):
-    if algo in ("tree_reduce", "tree_allreduce") and not _pow2(coord.size):
+def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True,
+             value0=1, silent=False):
+    if algo == "recursive_doubling_allreduce" and not _pow2(coord.size):
+        print("[skip] %s requires a power-of-two world size (got %d)" %
+              (algo, coord.size))
+        return None
+    if algo in ("tree_reduce",) and not _pow2(coord.size):
         print("[skip] %s requires a power-of-two world size (got %d)" %
               (algo, coord.size))
         return None
@@ -581,19 +627,23 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True, value0=1):
 
     params = _params_for(algo, mode, payload=payload, vector_len=vector_len)
     params["value0"] = value0
-    print("\n== Demo: %s  mode=%s ==" % (algo, mode))
+    if not silent:
+        print("\n== Demo: %s  mode=%s ==" % (algo, mode))
     if payload:
         # Benchmark payload is LOCAL per rank: every rank holds `payload`
-        # bytes; how much a single message carries depends on the algorithm
-        # (e.g. ring sends chunks of N/P) and is shown by the round events.
-        print("Local Payload per Rank: %s  (op=xor, fmt=raw)" % fmt_bytes(payload))
+        # bytes (Data Size = payload / 4 elements); how much a single
+        # message carries depends on the algorithm (ring sends chunks).
+        if not silent:
+            print("Local Payload per Rank: %s  (op=xor, fmt=raw)"
+                  % fmt_bytes(payload))
     else:
         params["data_size"] = vector_len
-        print("Data Size: %d elements  =  Local Data per Rank %s (int32)"
-              % (vector_len, fmt_bytes(vector_len * P.ELEMENT_BYTES)))
-        if algo == "ring_allreduce":
-            print("  (ring: one message = one chunk = Data Size / World Size "
-                  "elements; per-message bytes shown by the events)")
+        if not silent:
+            print("Data Size: %d elements  =  Local Data per Rank %s (int32)"
+                  % (vector_len, fmt_bytes(vector_len * P.ELEMENT_BYTES)))
+            if algo == "ring_allreduce":
+                print("  (ring: one message = one chunk = Data Size / World "
+                      "Size elements; per-message bytes shown by the events)")
     t0 = time.time()
     agg = coord.run_demo(params, mode)
     dt = time.time() - t0
@@ -615,6 +665,98 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True, value0=1):
     if agg and agg.errors:
         print("Errors:", agg.errors)
     return agg
+
+
+BENCH_ALGORITHMS = ["naive_allreduce", "recursive_doubling_allreduce",
+                    "ring_allreduce"]
+# bytes per rank per case — all divisible by World Size (int32 elements):
+#   16 B=4, 1 KB=256, 16 KB=4096, 256 KB=65536, 4 MB=1048576, 16 MB=4194304
+BENCH_SIZES = [16, 1024, 16 * 1024, 256 * 1024,
+               4 * 1024 * 1024, 16 * 1024 * 1024]
+BENCH_RUNS = 3
+
+
+def _median(vals):
+    s = sorted(vals)
+    n = len(s)
+    if n == 0:
+        return 0.0
+    if n % 2:
+        return s[n // 2]
+    return (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def _elem_rows():
+    """bytes -> (int32 elements)"""
+    return {b: b // P.ELEMENT_BYTES for b in BENCH_SIZES}
+
+
+def run_benchmark(coord):
+    """Performance Benchmark session: each rank enters ONE value, then 3
+    algorithms x 6 sizes x 3 runs run automatically; results are medians."""
+    print("\n========================================\n"
+          "Performance Benchmark\n"
+          "========================================")
+    print("\nAlgorithms:")
+    for a in BENCH_ALGORITHMS:
+        print("- %s" % T.pretty_algorithm(a))
+    print("\nMessage Sizes (Local Data per Rank):")
+    for b in BENCH_SIZES:
+        print("  %s  = %d elements" % (fmt_bytes(b), b // P.ELEMENT_BYTES))
+    print("\nRuns per case:\n%d" % BENCH_RUNS)
+    print("\nEach rank will enter one integer once.")
+    print("The same local value will be reused for all benchmark cases.")
+
+    if sys.stdin.isatty():          # interactive menu: rank 0 types once
+        raw = input("\nYour benchmark value (Rank 0, default 1):\n> ").strip()
+        try:
+            v0 = int(raw)
+        except ValueError:
+            v0 = 1
+    else:
+        v0 = 1
+    # Benchmark Setup is NOT a collective run: one integer per rank, cached
+    # for the whole session (no per-case inputs, no zero Data Size).
+    coord.send_to_workers({"t": P.C_RUN, "params": {"kind": "benchmark_setup",
+                                                    "mode": "performance"}})
+
+    rows = {a: {} for a in BENCH_ALGORITHMS}
+    total = len(BENCH_ALGORITHMS) * len(BENCH_SIZES) * BENCH_RUNS
+    done = 0
+    for a in BENCH_ALGORITHMS:
+        for b in BENCH_SIZES:
+            times = []
+            for k in range(BENCH_RUNS):
+                agg = run_demo(coord, a, "performance", payload=b,
+                               show=False, silent=True)
+                cms = coord.collective_ms()
+                ms = cms if cms is not None else 0.0
+                times.append(ms)
+                done += 1
+                print("raw %s %d run%d %.3f ms  (%d / %d)" %
+                      (a, b, k + 1, ms, done, total))
+            rows[a][b] = _median(times)
+
+    print("\n" + "=" * 78)
+    print("Performance Benchmark Results")
+    print("%d runs per case — median" % BENCH_RUNS)
+    print("World Size: %d" % coord.size)
+    print("=" * 78)
+    cols = ["Local Data / Rank", "Naive", "Recursive Doubling", "Ring"]
+    widths = [26, 10, 18, 12]
+    header = "".join(c.ljust(w) for c, w in zip(cols, widths))
+    print(header)
+    print("-" * len(header))
+    for b in BENCH_SIZES:
+        line = ("%s  = %d elem" % (fmt_bytes(b), b // P.ELEMENT_BYTES)).ljust(
+            widths[0])
+        line += ("%7.2f ms" % rows["naive_allreduce"][b]).ljust(widths[1])
+        line += ("%7.2f ms" % rows["recursive_doubling_allreduce"][b]
+                 ).ljust(widths[2])
+        line += ("%7.2f ms" % rows["ring_allreduce"][b]).ljust(widths[3])
+        print(line)
+    print("\nLower is better.")
+    print("\nBenchmark Complete.\n\nReturning to Teacher menu...")
 
 
 def _print_teaching_complete(agg, algo):
@@ -647,35 +789,12 @@ MENU = [
     ("Naive Reduce", "naive_reduce"),
     ("Naive AllReduce", "naive_allreduce"),
     ("Tree Reduce", "tree_reduce"),
-    ("Tree AllReduce", "tree_allreduce"),
+    ("Recursive Doubling AllReduce", "recursive_doubling_allreduce"),
     ("Ring AllReduce", "ring_allreduce"),
     ("Performance Benchmark", "benchmark"),
     ("Network Check", "network"),
     ("Exit", "exit"),
 ]
-
-
-def run_benchmark(coord):
-    algs = ["naive_allreduce", "tree_allreduce", "ring_allreduce"]
-    sizes = [8, 1024, 16 * 1024, 256 * 1024, 4 * 1024 * 1024]
-    print("\n========================================\nCollective Benchmark\n"
-          "World Size: %d\n"
-          "rows = Local Payload per Rank (bytes; each rank holds that much)\n"
-          "========================================" % coord.size)
-    header = "Local Payload".ljust(15) + "".join(a.replace("_", " ").ljust(18)
-                                                 for a in algs)
-    print(header)
-    print("-" * len(header))
-    for sz in sizes:
-        row = str(sz).ljust(15)
-        for a in algs:
-            if a == "ring_allreduce" and sz % coord.size:
-                row += "n/a".ljust(18)
-                continue
-            run_demo(coord, a, "performance", payload=sz, show=False)
-            cms = coord.collective_ms()      # Start Barrier -> all ranks done
-            row += ("%7.2f ms" % cms if cms is not None else "n/a").ljust(18)
-        print(row)
 
 
 def wait_ready(coord, size):
@@ -723,6 +842,11 @@ def main():
         print("-" * 40)
 
         wait_ready(coord, args.size)
+        # Warm the REAL persistent data-plane connections that collectives
+        # will reuse (workers already warmed theirs after joining; teacher
+        # warms its outbound legs). No message, no event, no timing.
+        coord.transport.warm_to(list(range(1, coord.size)))
+        print("MPI Data Plane Ready.")
         coord.connectivity_check()
 
         # Rank 0 COMM_WORLD is created ONCE and reused by every RUN.

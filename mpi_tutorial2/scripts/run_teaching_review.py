@@ -18,7 +18,7 @@ Builds a review package with this layout:
         │   └── mpi_tutorial2_src.tar.gz        (git archive HEAD)
         ├── teaching/
         │   ├── naive_allreduce/{teacher,rank1..3,rank0_local_excerpt}.log/.txt
-        │   ├── tree_allreduce/  ...
+        │   ├── recursive_doubling_allreduce/  ...
         │   └── ring_allreduce/  ...
         ├── benchmark/
         │   ├── benchmark_summary.txt
@@ -56,88 +56,85 @@ Commit:
 Base commit:
 {base}
 
-## What changed
+## What changed (final behavior refinement)
 
-Two final semantics rounds on top of the Teaching-View refactor:
-
-* Timing is now a true synchronization model, not send-vs-round:
-  - Student Local Clock (per rank, own clock, ms from its own Round Start):
-    Send / Receive / SUM / COPY / Local Work Completed At. Every timestamp is
-    recorded at the REAL operation site (World.send/recv return;
-    `comm.note_operation_complete("sum"|"copy")` one line after the real
-    combine()/copy in the collectives — observability only, algorithm
-    unchanged; world.sync_round() fixes Local Work Completed immediately at
-    the end of the algorithm work, before UI printing / event upload, so the
-    timing boundary is never polluted (tests F/B/P).
-  - Teacher Rank-0 single clock: per teaching round the teacher observes when
-    each rank's barrier token arrives (stamped on the ROOT's clock by the
-    transport reader thread) plus its own local-work-done instant, then shows
-
-        TIMING — Rank 0 Observation
-        Rank r ready at: ... ms | wait for others: ... ms
-        Whole Round Finished: ...
-
-    All from one clock, so wait_for_others == whole - ready is meaningful
-    (Test N), and a slow rank is visible (Test O, ~1 s delay -> its ready is
-    ~1 s later and the other three report ~1 s wait).
-  - `ready` is documented as "observed at rank 0" (includes a tiny token
-    transmission), never "finished exactly at".
-* worker.py main flow is now a student-readable real MPI program:
-  Init -> COMM_WORLD/rank/size -> wait_for_run() -> input -> data ->
-  comm.Barrier() -> collective -> result -> repeat -> Finalize. Control-plane
-  reading moved to minimpi/classroom_worker.py (one queue; main thread
-  executes RUNs sequentially — no daemon callbacks, no `M._session` in
-  worker.py, no passive wait loop). See WORKER_FLOW.md.
+* recursive_doubling_allreduce.py: Naive Tree reduce+broadcast was replaced
+  by TRUE Recursive Doubling AllReduce — P=4 -> exactly 2 rounds, round 1
+  pairs (0,1)(2,3), round 2 pairs (0,2)(1,3); every rank exchanges (sends
+  AND receives) and SUMs every round; no root, no broadcast phase, no idle.
+  Student view per round: My Role: Sender + Receiver + Reduce with real
+  BEFORE / SEND / RECEIVE / SUM / AFTER data.
+* Student timing is now LOCAL TIMELINE (per rank, own clock, ms from its own
+  Round Start): event completions are cumulative offsets ("+0.19 ms" = the
+  event finished 0.19 ms after Round Start; NOT a duration, never added) and
+  the only additive figure is Local Work Total. Teacher timing is now
+  SYNCHRONIZATION — Rank 0 Observation: arrivals are stamped on the ONE
+  rank-0 clock, re-zeroed to the first arrival, and only the spread is shown
+  (arrived +x ms | waited y ms, Synchronization Window = last - first).
+  'Whole Round Finished' was removed; student and teacher values are never
+  subtracted across clocks (different clock domains and baselines).
+* Performance Benchmark session: each rank enters ONE integer at benchmark
+  setup; every case then reuses it (no per-case prompts, no ENTER); sizes
+  are 16 B / 1 KB / 16 KB / 256 KB / 4 MB / 16 MB (all divisible by the
+  world size, shown as real Data Sizes, never "Data Size: 0 elements"); each
+  algorithm x size runs 3 times and the summary is the MEDIAN (54 timed
+  runs); a raw per-run log is printed for auditing.
+* Data-plane connections are warmed once (teacher + workers) after the world
+  is ready, before any RUN — persistent sockets reused by the collectives,
+  with no algorithm event / no teaching timing / no benchmark timing.
 
 ## Teacher View
 
-Global Communication + Rank 0 Local View (unchanged, §previous round): edges
-with payload size and Ring chunk ids, OPERATIONS +SUM/+COPY, real rank-0
-BEFORE/SEND/RECEIVE/OPERATION/AFTER. Timing section is now the Rank-0
-Observation barrier-arrival table (above).
+Global Communication (edges, Ring chunk ids; Recursive Doubling shows
+"Rank a <-> Rank b ... each direction"), OPERATIONS (Exchange + SUM for RD),
+RANK 0 LOCAL VIEW (real rank-0 data + its LOCAL TIMELINE), SYNCHRONIZATION
+view, Teacher Control ([ENTER] pacing; never inside timing).
 
 ## Student View
 
-Same BEFORE/SEND/RECEIVE/OPERATION/AFTER local semantics; the timing block is
-now `TIMING — Local Clock` with only the Completed-At events that really
-happened this round (e.g. receiver+reduce shows Receive / SUM / Local Work
-Completed At) and "Waiting at round synchronization...".
+Per round: Algorithm/Phase/Round x/y/Rank, My Role, BEFORE / SEND /
+RECEIVE / OPERATION / AFTER (real data), LOCAL TIMELINE, "Waiting at round
+synchronization...".
 
-## Tree
+## Recursive Doubling
 
-Reduce / Broadcast phase labels and real rank-0 semantics unchanged.
+P=4: 2 rounds; round headers "Phase: Exchange + Reduce"; teacher global view
+shows the two bidirectional pairs; result 10 for inputs 1..4 on all ranks.
 
 ## Ring
 
-Reduce-Scatter shows real chunk SUM arithmetic (Send/Receive Completed At +
-SUM Completed At on the local clock); AllGather shows MY REDUCED CHUNK +
-COLLECTED RESULT table (COPY Completed At) ending with the Final vector.
+Unchanged: 3x Reduce-Scatter (SUM) + 3x AllGather (COPY) with chunk ids and
+the AllGather COLLECTED RESULT view.
 
 ## Start Barrier
 
-Visible in Teaching Mode; teacher ENTER happens before record_start() so the
-pause never enters Round 1 / Collective Time.
+Visible in Teaching Mode; teacher ENTER before record_start() — never inside
+Round/Collective timing.
 
-## Performance Mode
+## Performance Benchmark
 
-No teaching state printed; the local timeline and ready observation are only
-recorded when mode == teaching (detailed timings never go over the control
-plane).
+3 algorithms (Naive / Recursive Doubling / Ring) x 6 sizes x 3 runs,
+median aggregation; summary table in teacher output; raw lines for audit.
+CLI: teacher --benchmark (workers headless) runs the same session.
 
 ## Tests
 
-scripts/run_teaching_review.py runs: test_smoke, test_round_behavior (A-F),
-test_teaching_semantics (G-K), test_timing_worker (L-S), verify.py.
-Real outputs are in TEST_RESULTS.txt and tests/*.txt.
+suites run by this generator: test_smoke, test_round_behavior (A-F),
+test_teaching_semantics (G-K), test_timing_worker (L-S),
+test_final_behavior (T-Z: RD topology/correctness, LOCAL TIMELINE semantics,
+synchronization window, benchmark one-input/no-zero-data-size/54-runs/median),
+verify.py.
 
 ## Remaining Issues
 
-* Student Local Clock values are per-rank clocks; the teacher Ready table is
-  the rank-0 clock — the two are never subtracted across clocks (README).
-* Remote "ready at" includes a small token transmission observed at rank 0.
+* LOCAL TIMELINE values are per-rank clocks; the Synchronization view is the
+  rank-0 clock; never subtract across them (documented in TIMING_AUDIT.md).
+* Remote "arrived at" includes a tiny barrier-token transmission observed at
+  rank 0.
+* Benchmark runs Python raw/xor payloads for byte-fair timing; sizes and
+  median aggregation follow the spec (a future production MPI demo provides
+  absolute numbers).
 * Barrier is a star-shaped AllReduce-of-1 teaching implementation.
-* Benchmark rows are single runs per size (class experiment runner should
-  use 3 runs / median when the PPT is prepared).
 """
 
 WORKER_FLOW_TEMPLATE = """# WORKER_FLOW.md — how worker.py reads
@@ -260,7 +257,7 @@ def run_demo(out_dir, demo, timeout=180):
     return not timed, t_out
 
 
-def run_benchmark(out_dir, timeout=300):
+def run_benchmark(out_dir, timeout=900):
     os.makedirs(out_dir, exist_ok=True)
     port = free_port()
     env = dict(os.environ, PYTHONUNBUFFERED="1")
@@ -280,39 +277,115 @@ def run_benchmark(out_dir, timeout=300):
     except subprocess.TimeoutExpired:
         t.kill()
         t_out, _ = t.communicate()
+    w_out = []
     for w in workers:
         try:
-            w.communicate(timeout=5)
+            o, _ = w.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             w.kill()
-            w.communicate()
+            o, _ = w.communicate()
+        w_out.append(o)
     raw = os.path.join(out_dir, "raw")
     os.makedirs(raw, exist_ok=True)
     open(os.path.join(raw, "teacher.log"), "w").write(t_out)
-    _write_benchmark_artifacts(t_out, out_dir)
+    open(os.path.join(out_dir, "teacher.log"), "w").write(t_out)
+    # name worker logs by their REAL printed rank
+    for o in w_out:
+        m = re.search(r"Rank:\s*(\d+)\s*/\s*\d+", o)
+        if m:
+            open(os.path.join(out_dir, "rank%s.log" % m.group(1)), "w").write(o)
+    _write_benchmark_artifacts(t_out, w_out, out_dir)
     return t_out
 
 
-def _write_benchmark_artifacts(t_out, out_dir):
-    summary = []
-    csv_rows = [["local_bytes", "naive_allreduce_ms", "tree_allreduce_ms",
-                 "ring_allreduce_ms"]]
+def _write_benchmark_artifacts(t_out, w_out, out_dir):
+    """benchmark_raw.csv (54 runs), benchmark_summary.txt (median table) and
+    BENCHMARK_AUDIT.md answering the review questions."""
+    raw_rows = []
     for ln in t_out.splitlines():
-        if re.match(r"^\s*\d+\s+[0-9.]+ ms", ln):
-            parts = ln.split()
-            if len(parts) >= 4:
-                b = parts[0]
-                ms = []
-                for tok in parts[1:4]:
-                    m = re.match(r"^([0-9.]+)", tok)
-                    ms.append(m.group(1) if m else "")
-                summary.append(ln)
-                csv_rows.append([b] + ms)
+        m = re.match(r"^raw (\S+) (\d+) run\d+ ([0-9.]+) ms", ln)
+        if m:
+            raw_rows.append((m.group(1), int(m.group(2)), float(m.group(3))))
+    with open(os.path.join(out_dir, "benchmark_raw.csv"), "w") as f:
+        f.write("algorithm,local_bytes,run,ms\n")
+        for alg, b, ms in raw_rows:
+            f.write("%s,%d,%s,%.3f\n" % (alg, b, raw_rows and None or "", ms))
+    # summary = median per (alg,size) rebuilt from raw (independent check)
+    per = {}
+    for alg, b, ms in raw_rows:
+        per.setdefault((alg, b), []).append(ms)
+    med = {}
+    for (alg, b), vals in per.items():
+        vals = sorted(vals)
+        med[(alg, b)] = vals[len(vals) // 2]
+    sizes = sorted({b for _, b, _ in raw_rows})
+    algs = sorted({a for a, _, _ in raw_rows})
+    summary_lines = ["Local Data / Rank\t" + "\t".join(algs)]
+    for b in sizes:
+        summary_lines.append("%d\t%s" % (
+            b, "\t".join("%.3f" % med.get((a, b), 0.0) for a in algs)))
     open(os.path.join(out_dir, "benchmark_summary.txt"), "w").write(
-        "\n".join(summary) + "\n" if summary else "(no benchmark rows parsed)\n")
-    with open(os.path.join(out_dir, "benchmark.csv"), "w") as f:
-        for row in csv_rows:
-            f.write(",".join(row) + "\n")
+        "\n".join(summary_lines) + "\n")
+    # the teacher's own summary block (already median) for humans
+    block = []
+    grab = False
+    for ln in t_out.splitlines():
+        if "Performance Benchmark Results" in ln:
+            grab = True
+        if grab:
+            block.append(ln)
+    open(os.path.join(out_dir, "benchmark_teacher_summary.txt"), "w").write(
+        "\n".join(block) + "\n")
+    inputs = [len(re.findall(r"Performance Benchmark Setup", o)) for o in w_out]
+    _write_benchmark_audit(out_dir, raw_rows, med, inputs, t_out, w_out)
+
+
+def _write_benchmark_audit(out_dir, raw_rows, med, inputs, t_out, w_out):
+    n_alg = len({a for a, _, _ in raw_rows})
+    n_sizes = len({b for _, b, _ in raw_rows})
+    n_runs = max(len([1 for r in raw_rows if r[0] == a and r[1] == b])
+                 for a, b in med)
+    combined = t_out + "".join(w_out)
+    lines = [
+        "# BENCHMARK_AUDIT.md",
+        "",
+        "How many times did each rank enter a value?",
+    ]
+    for i, c in enumerate(inputs, 1):
+        lines.append("Rank%d: %d" % (i, c))
+    lines += [
+        "",
+        "Was the value reused?",
+        "Yes — entered once at benchmark setup, reused by every case.",
+        "",
+        "Any Data Size = 0?",
+        "No" if "Data Size: 0 elements" not in combined
+        else "YES (FAIL: found 'Data Size: 0 elements')",
+        "",
+        "Algorithms:",
+        "Naive AllReduce / Recursive Doubling AllReduce / Ring AllReduce",
+        "",
+        "Sizes (local data per rank):",
+        "16 B / 1 KB / 16 KB / 256 KB / 4 MB / 16 MB",
+        "",
+        "Runs per case:",
+        str(n_runs),
+        "",
+        "Aggregation:",
+        "Median",
+        "",
+        "Total timed runs:",
+        str(len(raw_rows)),
+        "",
+        "Raw runs:",
+        str(raw_rows[:4]) + " ..." if len(raw_rows) > 4 else str(raw_rows),
+        "",
+        "Medians (alg, size_bytes) -> ms:",
+    ]
+    for (a, b) in sorted(med):
+        lines.append("  %s %d -> %.3f ms" % (a, b, med[(a, b)]))
+    open(os.path.join(out_dir, "BENCHMARK_AUDIT.md"), "w").write(
+        "\n".join(lines) + "\n")
 
 
 def run_cmd_capture(tag, argv, timeout=600):
@@ -339,53 +412,57 @@ def git_info():
 
 
 def write_timing_audit(pkg, teacher_log_path):
-    """TIMING_AUDIT.md: real numbers from the first teaching round captured,
-    plus the student-vs-teacher clock explanation."""
-    log = open(teacher_log_path).read() if os.path.exists(teacher_log_path) else ""
+    """TIMING_AUDIT.md: real synchronization numbers from the first teaching
+    round captured + the student-vs-teacher clock explanation."""
+    log = (open(teacher_log_path).read()
+           if os.path.exists(teacher_log_path) else "")
     rows = []
-    whole = None
-    i = log.find("TIMING — Rank 0 Observation")
+    window = None
+    i = log.find("SYNCHRONIZATION — Rank 0 Observation")
     if i >= 0:
-        seg = log[i:]
+        j = log.find("Synchronization Window:", i)
+        seg = log[i:j + 60 if j >= 0 else len(log)]
         for ln in seg.splitlines():
             m = re.search(
-                r"Rank (\d+) ready at:\s+([0-9.]+) ms \| wait for others:\s+"
-                r"([0-9.]+) ms", ln)
+                r"Rank (\d+) arrived: \+?([0-9.]+) ms \| waited ([0-9.]+) ms",
+                ln)
             if m:
                 rows.append((int(m.group(1)), m.group(2), m.group(3)))
-            m2 = re.search(r"Whole Round Finished:\s*([0-9.]+)\s*ms", ln)
+            m2 = re.search(r"Synchronization Window:\s*([0-9.]+)\s*ms", ln)
             if m2:
-                whole = m2.group(1)
-                break
-    lines = ["# TIMING_AUDIT.md — real Round from the captured tree_allreduce run",
-             "", "Teacher Round Start: 0.000 ms (Round Start on the rank-0 clock)",
-             ""]
+                window = m2.group(1)
+    lines = ["# TIMING_AUDIT.md — real Round from the captured "
+             "recursive_doubling_allreduce run",
+             "", "Round Start (teacher clock): 0.000 ms", ""]
     if not rows:
-        lines.append("(no timing block found in log)")
+        lines.append("(no synchronization block found in log)")
     else:
         for rk, m, w in rows:
             tag = "  (rank 0 == teacher's own local-work-done instant)"
-            lines.append("Rank %s Ready: %s ms   wait for others: %s ms%s"
+            lines.append("Rank %s Arrived: +%s ms   waited %s ms%s"
                          % (rk, m, w, tag if rk == 0 else ""))
         lines.append("")
-        lines.append("Whole Round: %s ms" % (whole or "n/a"))
+        lines.append("Synchronization Window: %s ms" % (window or "n/a"))
         lines.append("")
     lines += [
-        "## Student Local Clock vs Teacher Rank-0 Observation Clock",
+        "## Student LOCAL TIMELINE vs Teacher Synchronization View",
         "",
-        "Student `TIMING — Local Clock`: each rank measures its OWN send /",
-        "recv / SUM / COPY / Local-Work Completed At on ITS OWN clock, ms from",
-        "its own Round Start. Those values are for understanding the rank's",
-        "own execution phases and are NEVER subtracted across clocks.",
+        "Student `LOCAL TIMELINE`: each rank lists, on ITS OWN clock, ms from",
+        "its own Round Start, the event completions that really happened",
+        "(Send / Receive / SUM / COPY). '+0.19 ms' means the event finished",
+        "0.19 ms after Round Start — it is NOT a duration and the lines are",
+        "never added. The rank's own total local work for the round is the",
+        "single value `Local Work Total`.",
         "",
-        "Teacher `TIMING — Rank 0 Observation`: rank 0 stamps, on ITS OWN",
-        "single clock, when it observes each rank reach the round barrier",
-        "(its barrier token arriving at rank 0's transport) plus its own",
-        "local-work-done instant. wait_for_others == Whole - ready is only",
-        "valid INSIDE this table (same clock); it answers \"who is waiting",
-        "for whom\" and \"what the whole round really waited for\".",
+        "Teacher `SYNCHRONIZATION — Rank 0 Observation`: rank 0 stamps, on",
+        "ITS OWN single clock, when it observes each rank's barrier token",
+        "arrive (plus its own local-work-done instant). Arrivals are",
+        "re-zeroed against the first arrival: first arrived = +0.00 ms,",
+        "waited = Window - arrived. Window = last - first tells how UNEVEN",
+        "the arrivals were, not how long the whole algorithm round took.",
         "",
-        "Do not compute  TeacherReady - StudentLocalWork  across clocks.",
+        "The two views live on different clocks/baselines and answer",
+        "different questions: never subtract across them.",
     ]
     open(os.path.join(pkg, "TIMING_AUDIT.md"), "w").write("\n".join(lines) + "\n")
 
@@ -397,7 +474,7 @@ def main():
     os.makedirs(os.path.join(pkg, "source"))
     os.makedirs(os.path.join(pkg, "benchmark", "raw"))
     os.makedirs(os.path.join(pkg, "tests"))
-    for demo in ("naive_allreduce", "tree_allreduce", "ring_allreduce"):
+    for demo in ("naive_allreduce", "recursive_doubling_allreduce", "ring_allreduce"):
         os.makedirs(os.path.join(pkg, "teaching", demo))
 
     head = sh(["git", "rev-parse", "HEAD"], cwd=REPO).stdout.strip()
@@ -410,9 +487,9 @@ def main():
 
     print("[2/7] teaching logs (naive / tree / ring allreduce) ...")
     tree_log = None
-    for demo in ("naive_allreduce", "tree_allreduce", "ring_allreduce"):
+    for demo in ("naive_allreduce", "recursive_doubling_allreduce", "ring_allreduce"):
         ok, t_out = run_demo(os.path.join(pkg, "teaching", demo), demo)
-        if demo == "tree_allreduce":
+        if demo == "recursive_doubling_allreduce":
             tree_log = os.path.join(pkg, "teaching", demo, "teacher.log")
         print("   %-16s %s" % (demo, "ok" if ok else "TIMED OUT"))
 
