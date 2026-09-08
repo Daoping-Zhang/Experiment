@@ -76,7 +76,7 @@ Base commit:
 * Performance Benchmark session: each rank enters ONE integer at benchmark
   setup; every case then reuses it (no per-case prompts, no ENTER); sizes
   are 16 B / 1 KB / 16 KB / 256 KB / 4 MB / 16 MB (all divisible by the
-  world size, shown as real Data Sizes, never "Data Size: 0 elements"); each
+  world size, shown as real Data Sizes, never a zero-element placeholder); each
   algorithm x size runs 3 times and the summary is the MEDIAN (54 timed
   runs); a raw per-run log is printed for auditing.
 * Data-plane connections are warmed once (teacher + workers) after the world
@@ -308,8 +308,10 @@ def _write_benchmark_artifacts(t_out, w_out, out_dir):
             raw_rows.append((m.group(1), int(m.group(2)), float(m.group(3))))
     with open(os.path.join(out_dir, "benchmark_raw.csv"), "w") as f:
         f.write("algorithm,local_bytes,run,ms\n")
+        seen = {}
         for alg, b, ms in raw_rows:
-            f.write("%s,%d,%s,%.3f\n" % (alg, b, raw_rows and None or "", ms))
+            seen[(alg, b)] = seen.get((alg, b), 0) + 1
+            f.write("%s,%d,%d,%.3f\n" % (alg, b, seen[(alg, b)], ms))
     # summary = median per (alg,size) rebuilt from raw (independent check)
     per = {}
     for alg, b, ms in raw_rows:
@@ -503,6 +505,7 @@ def main():
         ("test_teaching_semantics", [PY, "tests/test_teaching_semantics.py"],
          420),
         ("test_timing_worker", [PY, "tests/test_timing_worker.py"], 600),
+        ("test_final_behavior", [PY, "tests/test_final_behavior.py"], 900),
         ("verify", [PY, "scripts/verify.py"], 900),
     ]
     combined = []
