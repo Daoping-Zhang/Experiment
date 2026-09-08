@@ -60,9 +60,19 @@ architecture):
   rounds 1-2 `Phase 1: Reduce`, rounds 3-4 `Phase 2: Broadcast`; Ring: 3x
   Reduce-Scatter then 3x AllGather), the Ring chunk schedule (identical
   arithmetic to collectives/ring_allreduce.py), bounded vector preview, and
-  the per-round local semantics BEFORE / SEND / RECEIVE / OPERATION / AFTER
-  built from a rank's REAL events (send value_before / recv value_after) and
-  its REAL initial data.
+  the per-round local semantics BEFORE / SEND / RECEIVE / OPERATION / AFTER.
+
+  Precise data model: the local views are RECONSTRUCTED from each rank's real
+  communication events (send value_before / recv value_after) and its real
+  initial data, applying the same operation semantics as the collectives
+  (presentation-side replay; collective internals are not instrumented and
+  no collective file was changed).
+* Ring AllGather presentation: during AllGather the rank's own vector does
+  not change (the module assembles the result internally), so the local view
+  shows the thing that really grows — MY REDUCED CHUNK, per-round SEND /
+  RECEIVE of already-reduced chunks, "COPY Chunk k into AllGather result",
+  a COLLECTED RESULT table (Chunk 0..P-1, "-" = not yet) and "n / P chunks
+  collected", ending with the full Final vector at 4/4.
 * Teacher (rank 0) is a real MPI participant and now shows, per teaching
   round, the fixed 4-part view: 1) GLOBAL COMMUNICATION (who->whom, payload
   size, Ring chunk ids) + OPERATIONS summary, 2) RANK 0 LOCAL VIEW (real
@@ -145,12 +155,10 @@ Run via scripts/run_teaching_review.py (see TEST_RESULTS.txt):
 
 ## Remaining Issues
 
-* Per-rank "My Send Finished" uses each rank's own clock; Round/Whole
+* Per-rank "My Send Finished" uses each rank's own clock; Whole Round
   Finished uses the teacher clock (fine on one machine / classroom LAN).
-* Ring per-round AFTER is shown as the rank's real vector, which only
-  changes in Reduce-Scatter rounds; during AllGather the module assembles
-  the gathered result internally, shown as "gathering ... collected so far"
-  and the final vector at Collective Complete.
+* Benchmark rows in this package are single runs per size (for the class
+  performance experiment the runner should later use 3 runs / median).
 * The Barrier is a star-shaped AllReduce-of-1 (teaching implementation, not
   production MPI's barrier algorithm).
 """
@@ -205,8 +213,21 @@ def run_demo(out_dir, demo, timeout=180):
         w_out.append(o)
     open(os.path.join(out_dir, "teacher.log"), "w").write(
         t_out + ("\n[TIMED OUT]\n" if timed else ""))
-    for i, o in enumerate(w_out, 1):
-        open(os.path.join(out_dir, "rank%d.log" % i), "w").write(o)
+    # MPI rank is assigned by JOIN order, NOT by process spawn order: name
+    # each log after the rank its worker really printed ("Rank: 2 / 4").
+    written = {}
+    for o in w_out:
+        m = re.search(r"Rank:\s*(\d+)\s*/\s*\d+", o)
+        rk = int(m.group(1)) if m else None
+        if rk is not None:
+            written[rk] = o
+    for rk in sorted(written):
+        open(os.path.join(out_dir, "rank%d.log" % rk), "w").write(written[rk])
+    if len(written) < len(w_out):
+        open(os.path.join(out_dir, "NOTE.txt"), "w").write(
+            "WARNING: %d worker logs could not be matched to a real rank "
+            "(join-order race) — see raw outputs below.\n\n%s"
+            % (len(w_out) - len(written), "\n".join(w_out)))
     return not timed
 
 

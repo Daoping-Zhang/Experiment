@@ -149,6 +149,13 @@ class RoundView:
     op_detail: str = ""       # multi-line real-data arithmetic (optional)
     after: Any = None
     after_note: str = ""
+    # Ring AllGather presentation (optional):
+    ring_owned_idx: Optional[int] = None   # this rank's reduced chunk id
+    ring_owned_val: Any = None             # ... and its real value
+    ring_collected: Optional[list] = None  # collected slots (value or None)
+    ring_collected_n: int = 0              # chunks collected so far
+    ring_total: int = 0                    # == P when all collected
+    ring_final: Any = None                 # full vector once 4/4 collected
 
 
 def _role(sends, receives, op):
@@ -186,9 +193,24 @@ class RoundCtx:
             self.chunks = [vals[i * cl:(i + 1) * cl] for i in range(P)]
             self.value = None
             self.gathered = 0      # chunks copied so far during AllGather
+            self.ag_started = False
+            self.owned_idx = None
+            self.collected = None  # AllGather result slots (value or None)
         else:
             self.value = list(initial_value)
             self.chunks = None
+
+    def _ag_start(self):
+        """Lazily initialise the AllGather collection state on the first
+        AllGather round: this rank owns one FULLY REDUCED chunk
+        (owned = (rank+1) % P) that is already in its result."""
+        if self.ag_started:
+            return
+        self.ag_started = True
+        self.owned_idx = (self.rank + 1) % self.P
+        self.collected = [None] * self.P
+        self.collected[self.owned_idx] = list(self.chunks[self.owned_idx])
+        self.gathered = 1
 
     def current_value(self):
         if self.chunks is not None:
@@ -230,24 +252,46 @@ def describe_round(ctx, rnd, events):
     after = None
     after_note = ""
     op_detail = ""
+    role = _role(sends, recvs, op)
+    op_short = "None"
+    if recvs:
+        op_short = "SUM" if op == "sum" else "COPY"
+
     if ctx.chunks is not None:                      # ring
+        if op == "copy":                            # ---- AllGather ------
+            ctx._ag_start()                         # collected starts with
+            for m in recvs:                         # our OWN reduced chunk
+                ci = m.chunk
+                if ci is not None and 0 <= ci < P:
+                    ctx.collected[ci] = list(m.data)
+            n = sum(1 for v in ctx.collected if v is not None)
+            final = None
+            if n == P:
+                out = []
+                for v in ctx.collected:
+                    out.extend(v)
+                final = out
+            return RoundView(
+                algorithm=alg, phase_label=phase_label, rnd=rnd, total=total,
+                rank=rank, role=role, before=None, sends=sends,
+                receives=recvs, operation="COPY", op_detail="",
+                after=None, after_note="",
+                ring_owned_idx=ctx.owned_idx,
+                ring_owned_val=list(ctx.chunks[ctx.owned_idx]),
+                ring_collected=[list(v) if v is not None else None
+                                for v in ctx.collected],
+                ring_collected_n=n, ring_total=P, ring_final=final)
+        # ---- Reduce-Scatter: chunks[recv_idx] += received (real data) ----
         pre = [list(c) for c in ctx.chunks]         # chunk values BEFORE this
         for m in recvs:                             # round's updates (for the
-            if op == "sum":                         # real-data op display)
-                ci = m.chunk
-                ctx.chunks[ci] = _elem_sum(ctx.chunks[ci], list(m.data))
-            else:
-                ctx.gathered += 1
+            ci = m.chunk                            # real-data op display)
+            ctx.chunks[ci] = _elem_sum(ctx.chunks[ci], list(m.data))
         after = ctx.current_value()
-        if op == "sum":
-            for m in recvs:
-                op_detail += ("Reduce Chunk %d:\n  %s + %s = %s\n"
-                              % (m.chunk, preview_vector(pre[m.chunk], 8, False),
-                                 preview_vector(m.data, 8, False),
-                                 preview_vector(ctx.chunks[m.chunk], 8, False)))
-        else:
-            after_note = ("gathering reduced chunks: %d / %d collected so far"
-                          % (ctx.gathered, P))
+        for m in recvs:
+            op_detail += ("Reduce Chunk %d:\n  %s + %s = %s\n"
+                          % (m.chunk, preview_vector(pre[m.chunk], 8, False),
+                             preview_vector(m.data, 8, False),
+                             preview_vector(ctx.chunks[m.chunk], 8, False)))
     else:                                           # whole-vector algorithms
         acc = list(before_disp)
         chain = []
@@ -271,10 +315,6 @@ def describe_round(ctx, rnd, events):
         # no receives -> op_detail stays "" (the OPERATION line already shows
         # "None")
 
-    role = _role(sends, recvs, op)
-    op_short = "None"
-    if recvs:
-        op_short = "SUM" if op == "sum" else "COPY"
     return RoundView(algorithm=alg, phase_label=phase_label, rnd=rnd,
                      total=total, rank=rank, role=role, before=before_disp,
                      sends=sends, receives=recvs, operation=op_short,
@@ -318,6 +358,31 @@ def local_view_text(view):
     L.append("Rank %d" % view.rank)
     L.append(bar)
     L.append("\nMy Role: %s" % view.role)
+
+    # Ring AllGather: the local data never changes during AllGather — what
+    # grows is the set of COLLECTED reduced chunks. Show that instead of a
+    # confusingly unchanged AFTER My Data.
+    if view.ring_collected is not None:
+        L.append("\nMY REDUCED CHUNK")
+        L.append("Chunk %d:" % view.ring_owned_idx)
+        L.append(preview_vector(view.ring_owned_val))
+        L.extend(_msg_line("SEND", view.sends, "send"))
+        L.extend(_msg_line("RECEIVE", view.receives, "recv"))
+        L.append("\nOPERATION")
+        for m in view.receives:
+            L.append("COPY Chunk %d into AllGather result" % m.chunk)
+        L.append("\nCOLLECTED RESULT")
+        for idx in range(view.ring_total):
+            v = view.ring_collected[idx]
+            L.append("Chunk %d: %s" % (idx, preview_vector(v, 8, False)
+                                       if v is not None else "-"))
+        L.append("\n%d / %d chunks collected" % (view.ring_collected_n,
+                                                 view.ring_total))
+        if view.ring_final is not None:
+            L.append("\nFinal:")
+            L.append(preview_vector(view.ring_final))
+        return "\n".join(L)
+
     L.append("\nBEFORE")
     L.append("My Data:")
     L.append(preview_vector(view.before))
