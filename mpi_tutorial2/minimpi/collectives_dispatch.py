@@ -49,11 +49,14 @@ def _load_module(algo):
         return importlib.import_module("collectives." + algo)
 
 
-def run(rt, params, value=None):
+def run(rt, params, value=None, barrier=True):
     """Run one collective over the MPI-compatible front-end.
 
     `value` is the rank's OWN typed input ([typed] * data_size is built here);
     when None we fall back to make_value (payload / legacy paths).
+    `barrier=True` runs the Start Barrier inside dispatch (teacher default);
+    the worker main thread calls comm.Barrier() itself (visible in its
+    program) and passes barrier=False.
 
     Both teacher rank 0 and student workers call this exact function, so the
     collective data plane is identical for every rank. MPI.Init/Finalize are
@@ -69,13 +72,17 @@ def run(rt, params, value=None):
     if value is not None:
         vl = int(params.get("vector_len") or params.get("data_size") or 0)
         if vl > 0 and params.get("fmt", P.FMT_INT32) != "raw":
-            value = [int(value)] * vl
+            if isinstance(value, (list, tuple)):        # pre-built local data
+                value = [int(v) for v in value]
+            else:
+                value = [int(value)] * vl
         elif params.get("fmt", P.FMT_INT32) == "raw":
             value = make_value(params, rank=rt.rank)
     else:
         value = make_value(params, rank=rt.rank)
 
-    comm.Barrier()   # Start Barrier: everyone ready, then the collective runs
+    if barrier:
+        comm.Barrier()   # Start Barrier: everyone ready, then the collective
 
     fn = getattr(_load_module(params["algorithm"]), params["algorithm"])
     if params["algorithm"] == "ping_pong":

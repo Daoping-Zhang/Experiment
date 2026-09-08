@@ -68,6 +68,10 @@ class PeerTransport:
         try:
             while not self._closed:
                 header, payload = P.recv_frame(conn)
+                # arrival_ns: when THIS rank's transport thread saw the frame
+                # — the receiving rank's own clock (rank 0 uses it to observe
+                # when each rank reached the round barrier).
+                header["arrival_ns"] = _now()
                 with self._inbox_cv:
                     self._inbox.append((header, payload))
                     self._inbox_cv.notify_all()

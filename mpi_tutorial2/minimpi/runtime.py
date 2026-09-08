@@ -112,6 +112,14 @@ class MiniRuntime:
         worker.py wires that through `_barrier`.
         """
         if self.mode == "teaching":
+            # test-only: simulate a rank whose LOCAL work is slow — the sleep
+            # sits between the local-work-done mark and the barrier ARRIVAL,
+            # so rank 0 observes this rank reaching the sync point late
+            # (see tests/test_timing_worker.py O).
+            import os as _os, time as _time
+            d = _os.environ.get("MINIMPI_LOCAL_WORK_DELAY")
+            if d:
+                _time.sleep(float(d))
             if self._barrier is not None:
                 self._barrier(rnd)
             else:
@@ -121,11 +129,12 @@ class MiniRuntime:
         return True
 
     # ------------------------------------------------------------------ run
-    def run_algorithm(self, params, value=None):
+    def run_algorithm(self, params, value=None, barrier=True):
         """Execute the collective named in params; store result."""
         from . import collectives_dispatch
         self.events.clear()
-        self.local_value = collectives_dispatch.run(self, params, value=value)
+        self.local_value = collectives_dispatch.run(self, params, value=value,
+                                                    barrier=barrier)
         return self.local_value
 
     def close(self):

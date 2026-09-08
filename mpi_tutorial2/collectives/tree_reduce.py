@@ -47,5 +47,6 @@ def tree_reduce(comm, value, op="sum", root=0):
             child = rank + bit
             received = comm.recv(source=child, tag=TAG)
             local = combine(local, received, op, comm.fmt)
+            comm.note_operation_complete("sum")   # real SUM finished
         comm.sync_round(rnd)
     return local

@@ -21,6 +21,7 @@ def naive_reduce(comm, value, op="sum", root=0):
         for _ in range(1, comm.Get_size()):
             received = comm.recv(source=ANY_SOURCE, tag=TAG)
             acc = combine(acc, received, op, comm.fmt)   # local reduce
+            comm.note_operation_complete("sum")          # real SUM finished
         comm.sync_round(rnd)
         return acc
     comm.begin_round(rnd, "all-to-one")

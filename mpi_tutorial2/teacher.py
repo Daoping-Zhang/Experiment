@@ -115,7 +115,8 @@ class Coordinator:
         self.agg = None
         # teacher-clock timings (ns)
         self._timing = {"start": None, "gather": {}, "release": {},
-                        "col_start": None, "col_end": None}
+                        "col_start": None, "col_end": None,
+                        "rank0": {}, "ready": {}}
 
         self.transport = PeerTransport("teacher", bind_host=self.host)
         self.peers[0]["port"] = self.transport.port
@@ -357,22 +358,25 @@ class Coordinator:
         else:
             view = T.describe_round(ctx, rnd, evs0)
             print(T.local_view_text(view))
+        if self.rank0.comm_world is not None:
+            lines = T.local_clock_text(self.rank0.comm_world.local_timings())
+            if lines:
+                print("\n" + "\n".join(lines))
 
-        # ---- 3. Timing (only ranks that really sent this round) -----------
-        senders = {e.get("source") for e in events if e.get("side") == "send"}
-        timing = agg.timing.get(rnd, {})
-        if 0 in senders and self.rank0.comm_world is not None:
-            send0, _w0 = self.rank0.comm_world.snapshot_ms()
-            timing.setdefault(0, {"send": send0})
-        print("\nTIMING")
-        for rk in sorted(senders):
-            t = timing.get(rk)
-            send = None if t is None else t.get("send")
-            txt = "N/A" if send is None else "%.2f ms" % send
-            print("Rank %d send finished: %s" % (rk, txt))
-        rms = self.round_ms(rnd)
+        # ---- 3. Timing: Rank-0 single-clock barrier-arrival model ---------
+        # Rank Ready At = when Rank 0 observed each rank reach this round's
+        # synchronization point (its barrier token arriving at rank 0), all
+        # measured on THE SAME teacher clock. Remote arrivals include a tiny
+        # token transmission, so we say "ready at / observed", never
+        # "finished exactly at".
+        rows = self.ready_table(rnd)
+        whole = max((m for _, m, _ in rows), default=None)
+        print("\nTIMING — Rank 0 Observation")
+        for rk, m, wait in rows:
+            print("Rank %d ready at: %8.2f ms | wait for others: %7.2f ms"
+                  % (rk, m, wait))
         print("\nWhole Round Finished: %s" %
-              ("%.2f ms" % rms if rms is not None else "N/A"))
+              ("%.2f ms" % whole if whole is not None else "N/A"))
 
         # ---- 4. Teacher Control -------------------------------------------
         last = rnd >= total
@@ -406,6 +410,56 @@ class Coordinator:
 
     def record_gather(self, rnd):
         self._timing["gather"][rnd] = now_ns()
+
+    # ---- barrier-arrival observation (ALL on the teacher's own clock) ----
+    def note_rank0_ready(self, rnd):
+        """Rank 0 finished its local algorithm work for this round."""
+        self._timing["rank0"][rnd] = now_ns()
+
+    def note_rank_arrival(self, rnd, src, arrival_ns):
+        """Rank 0 observed `src`'s barrier token arrive (rank-0 clock)."""
+        if arrival_ns is None:
+            arrival_ns = now_ns()
+        self._timing["ready"].setdefault(rnd, {})[src] = arrival_ns
+
+    def note_gather_ready(self, rnd):
+        """All barrier tokens gathered: record gather time and freeze the
+        ready map (rank 0's own ready is its local-work-done instant)."""
+        self.record_gather(rnd)
+        rd = self._timing["ready"].setdefault(rnd, {})
+        r0 = self._timing["rank0"].get(rnd)
+        if r0 is None:                    # safety fallback
+            r0 = now_ns()
+        rd[0] = r0
+
+    def _round_base_ns(self, rnd):
+        rel = self._timing["release"].get(rnd - 1)
+        if rel is not None:
+            return rel
+        return self._timing["start"]
+
+    def ready_ms(self, rnd, rank):
+        """Rank Ready At (ms from Round Start) on the teacher clock."""
+        base = self._round_base_ns(rnd)
+        ns = (self._timing.get("ready", {}).get(rnd) or {}).get(rank)
+        if base is None or ns is None:
+            return None
+        return (ns - base) / 1e6
+
+    def ready_table(self, rnd):
+        """[(rank, ready_ms, wait_ms)] for this round, teacher clock."""
+        rd = self._timing.get("ready", {}).get(rnd) or {}
+        rows = []
+        ms = {}
+        for rk, ns in rd.items():
+            m = self.ready_ms(rnd, rk)
+            if m is not None:
+                ms[rk] = m
+        whole = max(ms.values()) if ms else None
+        for rk in sorted(ms):
+            rows.append((rk, ms[rk], 0.0 if whole is None
+                         else max(0.0, whole - ms[rk])))
+        return rows
 
     def record_release(self, rnd):
         self._timing["release"][rnd] = now_ns()
@@ -453,6 +507,10 @@ class _Rank0Rt:
         self._agg = None                 # current RUN aggregator
         self._alg = ""                   # current RUN algorithm
         self._local_ctx = None           # per-run RoundCtx (rank-0 local view)
+        # World.sync_round() calls this the moment rank 0's local algorithm
+        # work for the round finished (before the round barrier) — the
+        # "rank 0 ready" instant on the teacher's own clock.
+        self.on_local_work_done = lambda rnd: coord.note_rank0_ready(rnd)
 
     def _on_start_gathered(self, rnd):
         """All ranks have arrived at the Start Barrier (release not sent)."""
@@ -471,10 +529,13 @@ class _Rank0Rt:
 
     def sync_round(self, rnd):
         if self.mode == "teaching":
+            coord = self._coord
             BarrierMod.barrier(
                 self.comm, rnd,
-                on_root_gathered=lambda r: self._coord.record_gather(r),
-                on_root_ready=lambda r: self._coord.on_round_ready(self._agg, r))
+                on_root_arrival=lambda src, ns: coord.note_rank_arrival(
+                    rnd, src, ns),
+                on_root_gathered=lambda r: coord.note_gather_ready(r),
+                on_root_ready=lambda r: coord.on_round_ready(self._agg, r))
         return True
 
 

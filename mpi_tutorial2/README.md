@@ -117,11 +117,21 @@ AllReduce-of-1（`minimpi/barrier.py`）：每 rank 发 `[1]`，rank 0 求和 = 
 再广播。rank 0 在"全班到齐（gather 完成）之后、广播 release 之前"打时间戳，所以
 Round 1 / Collective Time 的起点不会因为 release 的顺序而偏晚。
 
-**Timing（课堂核心 = 两个时刻）**
-- `My Send Finished`：本 rank 本轮最后一次算法 send 完成时刻相对本轮开始（无 send 显示 `N/A`，不伪造）。学生 UI 打印完本地视图后显示 `Waiting for the whole round...`——"我早就发完了，但整轮要等最慢的人"。
-- `Whole Round Finished`（teacher）：最后一个 rank 完成本轮算法的时刻——round barrier **arrival 收齐（gather 完成）**相对上一轮 release / Start Barrier 的时间。每个 worker 一做完本轮的算法工作就立刻上报 arrival（`[1]`），**之后**才打印本地视图、上传事件；因此终端打印与 control 事件上报都不计入（测试 F 用 1.5s/轮的"慢终端"验证）。teacher ENTER/讲解是 gather 之后的暂停，同样**不计入**（测试 B）。teacher 的 TIMING 只列本轮真实 Send 过的 rank（不打印满屏 N/A）。
-- 课堂直接比较 `My Send Finished 0.72 ms` vs `Whole Round Finished 4.50 ms`，学生就能看到：自己的任务早已结束，同步要等最慢的参与者。（各 rank 的 send 时刻用各自时钟，单机/教室局域网下近似可比。）
-- advanced/debug（`MINIMPI_SHOW_WORK=1`）：`My Round Work Finished` = 本 rank 自身时钟的本地工作结束时刻，**不是**"等待别人"的时间。
+**Timing（同步模型：两个时钟域，各回答各的问题）**
+- **Student — Local Clock（本 rank 自己的时钟，ms 相对自己的 Round Start）**：`TIMING — Local Clock` 显示本轮真实发生的事件完成时刻——`Send / Receive / SUM / COPY / Local Work Completed At`。时刻都在**真实操作处**记录（`send()/recv()` 返回、collective 中真实 `combine()`/copy 之后的一行 `comm.note_operation_complete("sum"/"copy")`、`sync_round()` 进入 barrier 前 = Local Work Completed）。UI 打印与事件上传在 barrier arrival **之后**进行，永远不进 timing boundary。仅用于理解"我什么时候收到 → 什么时候算完 → 什么时候完成本轮"。
+- **Teacher — Rank 0 Observation（只有 Rank 0 一只时钟）**：每轮 barrier 每个 rank 的 token 到达 Rank 0 的时刻（transport 收到时盖 Rank 0 时钟）+ Rank 0 自己完成本地工作的时刻：
+
+  ```
+  TIMING — Rank 0 Observation
+  Rank 0 ready at:  3.84 ms | wait for others:  0.00 ms
+  Rank 1 ready at:  0.46 ms | wait for others:  3.38 ms
+  ...
+  Whole Round Finished: 3.84 ms
+  ```
+
+  `Rank Ready At` 的定义是"Rank 0 观察到该 rank 到达本轮同步点"（含极小的 token 传输），**不是**"精确完成于某时刻"。wait = Whole − ready 只在同一只 Rank 0 时钟内成立（测试 N/O 验证；慢 rank 人为延迟 1s → ready 晚 ~1s、其它三人 wait ~1s）。
+- 跨时钟**不做差值**：不计算 `TeacherReady − StudentLocalWork`。
+- 无 Send/无 op 的轮次对应行显示 `N/A`（不伪造）；不再是 send-vs-round 那套解释。
 
 **性能实验**：Performance Mode 不打印/不上传每轮教学事件。`Collective Time`
 从 Start Barrier"全班到齐"（rank 0 gather 完成）那一刻开始，到**所有 rank 上报
@@ -142,6 +152,7 @@ mpi_tutorial2/
 │   ├── barrier.py        # teaching 同步：数据面 allreduce-of-1
 │   ├── collectives_dispatch.py# RUN → World + Start Barrier + 算法分发
 │   ├── teaching.py       # Teaching View 语义层（phase/chunk/preview/local view）
+│   ├── classroom_worker.py# 学生控制面读线程 + run 队列（教学基础设施）
 │   ├── metrics.py        # CommunicationEvent / EventLog
 │   └── runtime.py        # rank 端身份、事件、round 同步
 ├── collectives/          # 每个算法只调 comm.send/comm.recv
@@ -220,13 +231,17 @@ teacher 打印 Start Barrier 块、ENTER 后开跑）。每轮固定结构：
   COMMUNICATION`（只显示 `谁→谁 + 数据量`，Ring 带 `Chunk k`；不显示其它 rank 的
   完整数据；`OPERATIONS` 汇总每 rank 的收包运算 +SUM/+COPY）③ `RANK 0 LOCAL VIEW`
   （teacher = 真实 rank 0，用**真实执行数据**展示 Before/Send/Receive/Operation/
-  After）④ `TIMING`（只列本轮真实 Send 的 rank + `Whole Round Finished`）+ Teacher
+  After + 自己的 Local Clock 行）④ `TIMING — Rank 0 Observation`（同一只 Rank 0
+  时钟：每 rank `ready at` + `wait for others` + `Whole Round Finished`）+ Teacher
   Control（ENTER 控制下一轮）。
 - 学生本地视图：Algorithm / Phase / Round x/y / Rank / `My Role`（Sender /
   Receiver / +Reduce / +Copy / 明确 `Idle`）/ BEFORE / SEND / RECEIVE /
-  OPERATION / AFTER / TIMING（`My Send Finished`，无 send = N/A）/
-  `Waiting for the whole round...`。payload 都是**真实收发数据**，vector 预览
-  ≤8 元素。
+  OPERATION / AFTER / `TIMING — Local Clock`（Send/Receive/SUM/COPY/Local Work
+  Completed At，各自本 rank 时钟）/ `Waiting at round synchronization...`。
+  payload 都是**真实收发数据**，vector 预览 ≤8 元素。
+- collectives 允许一行教学 annotation：真实 `combine()`/copy 之后紧跟
+  `comm.note_operation_complete("sum"/"copy")`（只加观测、不改算法、不改变
+  Send/Recv/Round/Partner/数据），学生读起来反而更清楚操作何时完成。
 - Phase 语义由 presentation 层给出：Tree AllReduce P=4 → Round 1-2 `Phase 1:
   Reduce`、Round 3-4 `Phase 2: Broadcast`；Ring P=4 → 6 轮：3×`Reduce-Scatter`
   （SUM）+ 3×`AllGather`（COPY，不显示 SUM）。
@@ -247,7 +262,7 @@ teacher 打印 Start Barrier 块、ENTER 后开跑）。每轮固定结构：
 - **Ring AllReduce 需要 payload 长度能被 world size 整除**（本仓库默认向量长度=size；README 明示）。
 - payload `op` 默认 `sum`（int 向量逐元素和）；`raw` 大消息用 `xor`（大整数按位，纯 stdlib 也快）。
 - **这不是生产 MPI**：它只为教学复现"通信模型 / 热点 / 步数 / transfer time / effective bandwidth"，不要声称性能等同真实 MPI；校园网噪声大，benchmark 不设硬性 pass/fail 阈值。
-- 环境变量 `MINIMPI_TEACH_PAUSE`（auto 模式模拟 ENTER）、`MINIMPI_INPUT_DELAY`（模拟慢输入）、`MINIMPI_LOCAL_VIEW_DELAY`（模拟慢终端）、`MINIMPI_SHOW_WORK`（debug）均为 **test-only / 自动化钩子**，课堂交互不使用它们。
+- 环境变量 `MINIMPI_TEACH_PAUSE`（auto 模式模拟 ENTER）、`MINIMPI_INPUT_DELAY`（模拟慢输入）、`MINIMPI_LOCAL_VIEW_DELAY`（模拟慢终端）、`MINIMPI_LOCAL_WORK_DELAY`（模拟慢 rank 本地工作）、`MINIMPI_SHOW_WORK`（debug）均为 **test-only / 自动化钩子**，课堂交互不使用它们。
 - 依赖：**Python ≥ 3.8，仅标准库**（socket/threading/struct/json/time…）。macOS/Windows/Linux 均可。
 
 ## 7. 术语对应

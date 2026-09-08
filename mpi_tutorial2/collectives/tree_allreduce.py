@@ -42,6 +42,7 @@ def tree_allreduce(comm, value, op="sum", root=0):
             child = rank + bit
             received = comm.recv(source=child, tag=TAG)
             local = combine(local, received, op, comm.fmt)
+            comm.note_operation_complete("sum")   # real SUM finished
         comm.sync_round(rnd)
 
     # ---- Phase 2: reverse-tree broadcast ---------------------------------
@@ -57,5 +58,6 @@ def tree_allreduce(comm, value, op="sum", root=0):
         elif low_bits_clear and is_sender:
             parent = rank ^ bit
             local = comm.recv(source=parent, tag=TAG)
+            comm.note_operation_complete("copy")  # real COPY (result)
         comm.sync_round(rnd)
     return local

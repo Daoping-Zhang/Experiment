@@ -22,6 +22,7 @@ def naive_allreduce(comm, value, op="sum", root=0):
         for _ in range(1, size):
             received = comm.recv(source=ANY_SOURCE, tag=TAG)
             acc = combine(acc, received, op, comm.fmt)
+            comm.note_operation_complete("sum")          # real SUM finished
         comm.sync_round(1)
     else:
         comm.send(value, dest=root, tag=TAG)
@@ -36,5 +37,6 @@ def naive_allreduce(comm, value, op="sum", root=0):
         comm.sync_round(2)
         return acc
     result = comm.recv(source=root, tag=TAG)
+    comm.note_operation_complete("copy")                 # took the result
     comm.sync_round(2)
     return result

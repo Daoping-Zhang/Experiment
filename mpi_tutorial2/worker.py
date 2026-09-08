@@ -1,73 +1,129 @@
 #!/usr/bin/env python3
-"""worker.py — one student rank (a MiniMPI worker).
+"""worker.py — one student rank: a real MPI-style program.
 
-Usage:
-    python3 worker.py --server <teacher-ip>:<port>
+Read the main flow top-down:
+
+    MPI.Init(...)                 # 1  one MPI session for this process
+    comm = MPI.COMM_WORLD         # 2  the world communicator
+    rank = comm.Get_rank()        # 3  my identity
+    size = comm.Get_size()
+
+    while True:
+        run = classroom.wait_for_run()    # 4  wait for the teacher's next RUN
+        if run is None:                   #    (None == session shutdown)
+            break
+        value = read_one_integer(...)     # 5  I type one integer
+        data = [value] * run.data_size    # 6  my local data vector
+        comm.Barrier()                    # 7  Start Barrier: wait for everyone
+        result = run_one_collective(...)  # 8  the real collective
+        show_result(result)               # 9  my result
+
+    MPI.Finalize()                # 10 end the MPI session
+
+The classroom control plane (join / RUN / SHUTDOWN) is teaching
+infrastructure, not fake MPI API — it stays inside ClassroomWorker.
 """
 import argparse
 import base64
 import os
-import socket
 import sys
-import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from minimpi import protocol as P  # noqa: E402
-from minimpi import teaching as T  # noqa: E402
-from minimpi.runtime import MiniRuntime  # noqa: E402
+from minimpi import mpi as M               # noqa: E402
+from minimpi import protocol as P          # noqa: E402
+from minimpi import teaching as T          # noqa: E402
+from minimpi.classroom_worker import ClassroomWorker  # noqa: E402
 
 
-def run_demo(rt, control, params):
-    """Execute one collective; report per-round + final result to teacher."""
-    # The welcome message only contained the peers joined at that moment;
-    # the run command carries the full, final peer table — apply it first.
+def main():
+    args = parse_args()
+
+    MPI = M                                 # MPI.Init starts ONE session:
+    MPI.Init(server=args.server)            # connects/joins + COMM_WORLD
+    try:
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+
+        print_banner(rank, size)
+        run_classroom(comm)
+    finally:
+        MPI.Finalize()                      # every exit path ends the session
+
+
+def run_classroom(comm):
+    """The student's run loop: wait -> input -> data -> barrier -> collective."""
+    classroom = ClassroomWorker.attach_session()
+    try:
+        while True:
+            run = classroom.wait_for_run()       # blocks until the teacher
+            if run is None:                      # sends a RUN (None == end)
+                print("[shutdown]")
+                return
+
+            value = read_one_integer(comm.Get_rank())
+            data = [value] * run.data_size
+
+            print("\nAlgorithm: %s\nData Size: %d elements\n"
+                  % (run.algorithm, run.data_size))
+            if run.mode == "teaching":
+                print("Local data ready.\n\nEntering MPI Barrier...\n"
+                      "Waiting for all ranks...")
+
+            comm.Barrier()               # Start Barrier (both modes): the
+                                         # collective only starts when every
+                                         # rank is ready
+
+            result = run_one_collective(classroom, run, data)
+            show_result(comm.Get_rank(), run, result)
+    finally:
+        classroom.close()
+
+
+def run_one_collective(classroom, run, data):
+    """Prepare one RUN and execute it on the session runtime.
+
+    Returns the collective's real result (or None on error, which is
+    reported to the teacher). This is where teaching hooks are installed —
+    the algorithm files stay untouched.
+    """
+    rt = classroom.runtime
+    control = rt.control
+    params = run.params
+
+    # The welcome only contained the peers joined at that moment; the RUN
+    # command carries the full peer table — apply it first.
     peers = params.get("peers")
     if peers:
         table = {int(k): (v["host"], int(v["port"]))
                  for k, v in peers.items() if int(k) != rt.rank}
         rt.transport.set_peers(rt.rank, table)
 
-    mode = params.get("mode", "performance")
-    rt.mode = mode
-    rt.run_meta = {"algorithm": params.get("algorithm", ""),
-                   "data_size": params.get("data_size", params.get("vector_len", 0)),
+    rt.mode = run.mode
+    rt.run_meta = {"algorithm": run.algorithm, "data_size": run.data_size,
                    "vector_len": params.get("vector_len", 0),
                    "fmt": params.get("fmt", "i32")}
 
-    # ---- student inputs ONE integer for this run ----------------------
-    ds = rt.run_meta["data_size"]
-    print("\nAlgorithm: %s\nData Size: %s elements\n" %
-          (rt.run_meta["algorithm"], ds))
-    value = _read_one_int(rt)          # [value] * data_size
-    rt.typed_value = value
-
-    if mode == "teaching":
+    if run.mode == "teaching":
         from minimpi import barrier as BarrierMod
         rt.show_ui = True
         rt._report = None
         rt._on_round = None
 
         # Per-run local-semantics state (real events + real initial data).
-        alg = rt.run_meta["algorithm"]
-        ds = int(rt.run_meta["data_size"] or rt.run_meta.get("vector_len") or 0)
-        if ds > 0 and rt.run_meta.get("fmt") == "i32":
-            initial = [value] * ds
+        if run.data_size > 0 and run.fmt == "i32":
+            rt._local_ctx = T.RoundCtx(run.algorithm, rt.size, rt.rank, data)
         else:
-            initial = [value]
-        rt._local_ctx = T.RoundCtx(alg, rt.size, rt.rank, initial)
-
-        # Start Barrier is about to run inside run_algorithm() -> show it.
-        print("\nLocal data ready.\n\nEntering MPI Barrier...\n"
-              "Waiting for all ranks...")
+            rt._local_ctx = None
 
         def round_barrier(rnd):
             # ARRIVAL first: barrier() sends this rank's [1] to rank 0 the
-            # moment its algorithm work finished. The student local view and
-            # the C_ROUND_DONE upload then run in the barrier's on_arrived
-            # window (while this rank waits for the release), so UI printing
-            # and event report never enter Round Finished At.
+            # moment its algorithm work finished. The student local view +
+            # C_ROUND_DONE upload run inside the barrier's on_arrived window
+            # (while waiting for the release), so UI/upload never enter the
+            # local-work / ready timings.
             BarrierMod.barrier(rt.comm, rnd,
                                on_arrived=lambda _r: _show_and_report(
                                    rt, control, _r))
@@ -80,50 +136,61 @@ def run_demo(rt, control, params):
         rt._local_ctx = None
 
     try:
-        result = rt.run_algorithm(params, value=value)
-        if result is not None and not params.get("payload"):
-            first = result[0] if isinstance(result, list) and result else result
-            if mode == "teaching":
-                _print_final(rt, params, result, first)
-            else:
-                print("\nResult: %s\n" % first)
-        # Do not ship multi-MB results back over the control channel — for
-        # payload benchmarks the teacher only needs completion + no errors.
+        result = rt.run_algorithm(params, value=data, barrier=False)
         final = None if params.get("payload") else _encode(result)
         control.send({"t": P.C_DONE, "rank": rt.rank, "final": final,
                       "events": len(rt.events.events)})
+        return result
     except Exception as e:  # noqa: BLE001
         control.send({"t": P.C_DONE, "rank": rt.rank, "error": str(e),
                       "final": None, "events": 0})
+        return None
 
 
-def _encode(value):
-    if isinstance(value, (bytes, bytearray)):
-        return {"raw": base64.b64encode(bytes(value)).decode()}
-    if isinstance(value, list):
-        return {"vec": value}
-    return {"vec": [value]}
+# --------------------------------------------------------------------------
+# helpers below — the run loop above is the student-facing program
+# --------------------------------------------------------------------------
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--server", default="127.0.0.1:9000",
+                    help="rank 0 ip:port")
+    return ap.parse_args()
 
 
-def _read_one_int(rt):
+def print_banner(rank, size):
+    print("\nMiniMPI Worker")
+    print("Rank: %d / %d\n" % (rank, size))
+    print("Waiting for Rank 0...")
+
+
+def read_one_integer(rank):
     """Each student types one integer per RUN; vector = [n] * data_size.
     Headless (non-tty) fallback: rank + 1 so automation stays deterministic."""
-    import os as _os, time as _time
-    if _os.environ.get("MINIMPI_INPUT_DELAY"):
-        _time.sleep(float(_os.environ["MINIMPI_INPUT_DELAY"]))
+    if os.environ.get("MINIMPI_INPUT_DELAY"):
+        time.sleep(float(os.environ["MINIMPI_INPUT_DELAY"]))
     if sys.stdin.isatty():
         try:
             line = input("Input one integer:\n> ").strip()
             n = int(line)
         except (EOFError, ValueError):
-            n = rt.rank + 1
+            n = rank + 1
         return n
-    return rt.rank + 1
+    return rank + 1
 
 
-def _print_final(rt, params, result, first):
+def show_result(rank, run, result):
+    if result is None or run.params.get("payload"):
+        return
+    first = result[0] if isinstance(result, list) and result else result
+    if run.mode == "teaching":
+        _print_final(rank, run, result, first)
+    else:
+        print("\nResult: %s\n" % first)
+
+
+def _print_final(rank, run, result, first):
     """Student-side 'Collective Complete' block (teaching mode)."""
-    alg = params.get("algorithm", "")
+    alg = run.algorithm
     allreduce = alg in ("naive_allreduce", "tree_allreduce", "ring_allreduce")
     print("\n========================================")
     print("Collective Complete")
@@ -135,7 +202,7 @@ def _print_final(rt, params, result, first):
         if allreduce:
             print("\nAll elements have the same value.")
             print("Every rank received the same reduced result.")
-        elif rt.rank == 0:
+        elif rank == 0:
             print("\nRank 0 (root) owns the final reduced result.")
         else:
             print("\nThis rank is not the root.")
@@ -145,127 +212,46 @@ def _print_final(rt, params, result, first):
     print()
 
 
+def _encode(value):
+    if isinstance(value, (bytes, bytearray)):
+        return {"raw": base64.b64encode(bytes(value)).decode()}
+    if isinstance(value, list):
+        return {"vec": value}
+    return {"vec": [value]}
+
+
 def _show_and_report(rt, control, rnd):
     """Student side of a teaching round sync — runs INSIDE the round
-    barrier's on_arrived window: this rank already reported its arrival to
-    rank 0 (so Round Finished At is fixed), and is now waiting for the
-    release. Here it prints its local view and uploads C_ROUND_DONE."""
-    _show_round(rt, rnd)          # prints local view; sets rt._snap
-    send_ms, work_ms = rt._snap
+    barrier's on_arrived window: arrival already reported to rank 0 (so all
+    round timings are fixed), now print the local view + upload events while
+    waiting for the release."""
+    _show_round(rt, rnd)
     control.send({"t": P.C_ROUND_DONE, "rnd": rnd,
                   "events": [e.light_dict()
-                             for e in rt.comm.events.by_round(rnd)],
-                  "send_ms": send_ms, "work_ms": work_ms})
+                             for e in rt.comm.events.by_round(rnd)]})
 
 
 def _show_round(rt, rnd):
-    """Student local view for one finished logical round (teaching mode).
-
-    Structure (spec §12-§14): Algorithm / Phase / Round x / y / Rank,
-    My Role, BEFORE, SEND, RECEIVE, OPERATION, AFTER, TIMING.
-    """
-    # test-only: artificially slow down the LOCAL UI after arrival, to prove
-    # UI printing never enters Round Finished At (see tests/test_round_behavior
-    # F). Arrival already happened — this only delays the release wait.
+    """Student local view for one finished logical round (teaching mode)."""
+    # test-only: slow down the LOCAL UI after arrival (proves UI never
+    # enters round timing; see tests/test_round_behavior F).
     if os.environ.get("MINIMPI_LOCAL_VIEW_DELAY"):
         time.sleep(float(os.environ["MINIMPI_LOCAL_VIEW_DELAY"]))
-    meta = rt.run_meta
-    alg = meta.get("algorithm", "")
     evs = [e for e in rt.comm.events.by_round(rnd) if e.kind == "algorithm"]
     ctx = getattr(rt, "_local_ctx", None)
-    if ctx is None:                       # safety: rebuild if unavailable
-        ds = int(meta.get("data_size") or 0)
+    if ctx is None:
+        ds = int(rt.run_meta.get("data_size") or 0)
         base = getattr(rt, "typed_value", rt.rank + 1)
-        ctx = T.RoundCtx(alg, rt.size, rt.rank, [base] * (ds or 1))
+        ctx = T.RoundCtx(rt.run_meta.get("algorithm", ""), rt.size, rt.rank,
+                         [base] * (ds or 1))
         rt._local_ctx = ctx
     view = T.describe_round(ctx, rnd, evs)
     lines = [T.local_view_text(view)]
-    send_ms, work_ms = rt.comm_world.snapshot_ms()
-    rt._snap = (send_ms, work_ms)      # uploaded with C_ROUND_DONE (teacher)
-    send_txt = "N/A" if send_ms is None else "%.2f ms" % send_ms
-    lines.append("\nTIMING")
-    lines.append("My Send Finished: %s" % send_txt)
-    # Debug/advanced only — NOT a "sync wait": it is this rank's own-clock
-    # local work finish (no teacher clock, no other ranks involved).
-    if os.environ.get("MINIMPI_SHOW_WORK"):
-        work_txt = "N/A" if work_ms is None else "%.2f ms" % work_ms
-        lines.append("My Round Work Finished: %s   (own clock)" % work_txt)
-    lines.append("\nWaiting for the whole round...")
+    # Local Clock: every value on THIS rank's own clock, ms from Round Start
+    lines.append("\nTIMING — Local Clock")
+    lines.extend(T.local_clock_text(rt.comm_world.local_timings()))
+    lines.append("\nWaiting at round synchronization...")
     print("\n" + "\n".join(lines))
-
-
-class WorkerShell:
-    """Control-plane reader: one blocking thread per worker that reacts to
-    teacher commands while algorithm threads run independently."""
-
-    def __init__(self, rt):
-        self.rt = rt
-        self.control = rt.control
-        self.shutdown = threading.Event()
-        self._reader = threading.Thread(target=self._read_loop, daemon=True)
-        self._reader.start()
-
-    def _read_loop(self):
-        while not self.shutdown.is_set():
-            try:
-                m = self.control.recv()
-            except (ConnectionError, OSError):
-                break
-            self._handle(m)
-        self.shutdown.set()
-
-    def _handle(self, m):
-        t = m.get("t")
-        if t == P.C_RUN:
-            threading.Thread(target=run_demo,
-                             args=(self.rt, self.control, m["params"]),
-                             daemon=True).start()
-        elif t == P.C_CHECK:
-            ok, fail = [], []
-            for dst, ep in m.get("peers", {}).items():
-                dst = int(dst)
-                if dst == self.rt.rank:
-                    continue
-                try:
-                    s = socket.create_connection((ep["host"], int(ep["port"])),
-                                                 timeout=3)
-                    s.close()
-                    ok.append(dst)
-                except OSError:
-                    fail.append(dst)
-            self.control.send({"t": P.C_CHECK_REPORT, "rank": self.rt.rank,
-                               "pass": ok, "fail": fail})
-        elif t == P.C_SHUTDOWN:
-            self.shutdown.set()
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--server", default="127.0.0.1:9000", help="rank 0 ip:port")
-    args = ap.parse_args()
-
-    from minimpi import mpi as M
-
-    # ---- MPI session starts: Init does connect/join/rank/size + COMM_WORLD
-    M.Init(server=args.server)
-
-    comm = M.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
-
-    print("\nMiniMPI Worker")
-    print("Rank: %d / %d\n" % (rank, size))
-    print("Waiting for Rank 0...")
-
-    # ---- wait/run loop (teacher commands drive collectives from here)
-    rt = M._session["rt"]
-    shell = WorkerShell(rt)
-    while not shell.shutdown.wait(1.0):
-        pass
-    print("[shutdown]")
-
-    # ---- MPI session ends -------------------------------------------------
-    M.Finalize()
 
 
 if __name__ == "__main__":

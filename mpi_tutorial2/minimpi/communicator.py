@@ -81,6 +81,7 @@ class Communicator:
         self.size = size
         self.events = events  # metrics.EventLog or None
         self.algo_hook = None  # minimpi.synchronization hook (round sync)
+        self.last_arrival_ns = None  # arrival of the most recent recv (own clock)
 
     # ------------------------------------------------------------------ info
     def Get_rank(self):
@@ -114,6 +115,9 @@ class Communicator:
             raise TimeoutError("Receive timeout: source=%s tag=%s" % (source, tag))
         header, payload = result
         t1 = now_ns()
+        # arrival_ns (stamped by the transport reader thread on THIS rank's
+        # clock) is how rank 0 can observe when each peer really arrived.
+        self.last_arrival_ns = header.get("arrival_ns")
         value = decode(payload, header.get("fmt", P.FMT_RAW))
         if header.get("fmt") == P.FMT_RAW and payload is not value:
             pass  # decode returns payload itself for raw

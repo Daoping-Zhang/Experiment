@@ -347,6 +347,31 @@ def _msg_line(title, msgs, direction):
     return lines
 
 
+def local_clock_text(timings):
+    """Render the local-clock Completed-At lines (student + rank-0 shared).
+
+    All values are ms from this rank's own Round Start; None = that event
+    did not happen this round. Never labelled as network/CPU duration.
+    """
+    lines = []
+
+    def line(label, v):
+        lines.append("%-26s%s" % (label, "N/A" if v is None
+                                  else "%.2f ms" % v))
+    line("Send Completed At:", timings.get("send"))
+    line("Receive Completed At:", timings.get("recv"))
+    if timings.get("op") is not None:
+        kind = timings.get("op_kind", "")
+        if kind == "sum":
+            line("SUM Completed At:", timings["op"])
+        elif kind == "copy":
+            line("COPY Completed At:", timings["op"])
+        else:
+            line("Operation Completed At:", timings["op"])
+    line("Local Work Completed At:", timings.get("work"))
+    return lines
+
+
 def local_view_text(view):
     """Render one rank's per-round local view (student OR teacher rank 0)."""
     L = []

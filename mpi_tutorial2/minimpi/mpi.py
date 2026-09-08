@@ -98,8 +98,11 @@ class World:
     """MPI-like communicator facade around one rank's runtime.
 
     All communication still goes through the runtime's transport; this class
-    only gives it standard-MPI names, readable default metadata and the two
-    teaching timings (My Send Completion / local Round Finished).
+    only gives it standard-MPI names, readable default metadata and the
+    teaching local timeline (this rank's own clock, relative to Round Start):
+
+        Send Completed / Receive Completed / Operation Completed /
+        Local Work Completed   (recorded at the REAL send/recv/op/round end)
     """
 
     def __init__(self, rt):
@@ -111,9 +114,13 @@ class World:
         # current logical round / phase used to tag every send/recv event
         self._rnd = 0
         self._phase = ""
-        # per-round teaching timings (relative to THIS rank's round start)
+        # per-round local timeline (ns on THIS rank's own clock)
         self._round_start = 0.0
         self._send_finish = None
+        self._recv_finish = None
+        self._op_finish = None
+        self._op_kind = ""          # "sum" | "copy"
+        self._work_finish = None
 
     def configure(self, algorithm="", fmt="i32"):
         """Set metadata used to tag this demo's communication events."""
@@ -134,41 +141,66 @@ class World:
         n = self._rt.comm.send(value, dest, tag=tag, fmt=self.fmt,
                                algo=self.algorithm, phase=self._phase,
                                rnd=self._rnd)
-        self._send_finish = now_ns()      # My Send Completion (algorithm sends)
+        # REAL send completion: the frame was handed to the transport
+        self._send_finish = now_ns()
         return n
 
     def recv(self, source=ANY_SOURCE, tag=ANY_TAG, timeout=None):
         """Blocking receive matched by (source, tag)."""
-        return self._rt.comm.recv(source=source, tag=tag, fmt=self.fmt,
-                                  algo=self.algorithm, phase=self._phase,
-                                  rnd=self._rnd, timeout=timeout)
+        from .metrics import now_ns
+        value = self._rt.comm.recv(source=source, tag=tag, fmt=self.fmt,
+                                   algo=self.algorithm, phase=self._phase,
+                                   rnd=self._rnd, timeout=timeout)
+        # REAL receive completion: the message returned to the algorithm
+        self._recv_finish = now_ns()
+        return value
 
     # -- sync point (teaching) --------------------------------------------
     def begin_round(self, rnd, phase=""):
-        """Mark the start of a logical round (labels events; see README)."""
+        """Mark the start of a logical round: Round Start on THIS rank's
+        clock. Every Completed-At timestamp below is relative to here."""
         from .metrics import now_ns
         self._rnd = rnd
         self._phase = phase
         self._round_start = now_ns()
         self._send_finish = None
+        self._recv_finish = None
+        self._op_finish = None
+        self._op_kind = ""
+        self._work_finish = None
 
-    # -- timing (teaching) ------------------------------------------------
-    def send_finished_at_ms(self):
-        """My Send Completion: from round start to this rank's last algorithm
-        send completion in this round. None if this rank sent nothing."""
-        if self._send_finish is None:
+    # -- real-operation annotation (single line, teaching only) ------------
+    def note_operation_complete(self, kind):
+        """Called BY the collective right after a REAL operation finished
+        (SUM after combine(), COPY after taking a received value). One tiny
+        observability line; never changes the algorithm."""
+        if getattr(self._rt, "mode", "performance") != "teaching":
+            return
+        from .metrics import now_ns
+        self._op_finish = now_ns()
+        self._op_kind = kind
+
+    # -- timing (teaching local timeline) ----------------------------------
+    def _ms(self, ns):
+        if ns is None:
             return None
-        return (self._send_finish - self._round_start) / 1e6
+        return (ns - self._round_start) / 1e6
+
+    def local_timings(self):
+        """All Completed-At values on THIS rank's own clock, ms from Round
+        Start. Fields are None when that event did not happen this round."""
+        return {
+            "send": self._ms(self._send_finish),
+            "recv": self._ms(self._recv_finish),
+            "op_kind": self._op_kind,
+            "op": self._ms(self._op_finish),
+            "work": self._ms(self._work_finish),
+        }
 
     def snapshot_ms(self):
-        """(send_ms, work_ms) relative to this rank's round start; work_ms is
-        measured now, i.e. when the rank finished its own algorithm work
-        (before any teaching barrier / teacher pause)."""
-        from .metrics import now_ns
-        now = now_ns()
-        send_ms = self.send_finished_at_ms()
-        work_ms = (now - self._round_start) / 1e6
-        return send_ms, work_ms
+        """Back-compat: (send_ms, work_ms)."""
+        t = self.local_timings()
+        return t["send"], t["work"]
 
     def Barrier(self):
         """Start-of-RUN barrier (both modes). Internally an AllReduce-of-1:
@@ -192,7 +224,19 @@ class World:
         Teaching mode: everyone takes part in a data-plane allreduce-of-1
         barrier here; rank 0 prints the round view and waits for ENTER.
         Performance mode: no-op (round is only a label).
+
+        Local Work Completed is fixed HERE — immediately when this rank
+        finished all its real algorithm work for the round, before any UI
+        printing or event upload (those run inside the barrier's on_arrived
+        window and never enter the timing boundary).
         """
+        if getattr(self._rt, "mode", "performance") == "teaching" \
+                and self._work_finish is None:
+            from .metrics import now_ns
+            self._work_finish = now_ns()
+        hook = getattr(self._rt, "on_local_work_done", None)
+        if hook is not None:
+            hook(rnd)
         self._rt.sync_round(rnd)
 
     # -- collectives (standard + teaching extras) -------------------------

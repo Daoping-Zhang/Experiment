@@ -42,6 +42,7 @@ def ring_allreduce(comm, value, op="sum", root=0):
         comm.send(chunks[send_idx], dest=nxt, tag=TAG)
         got = comm.recv(source=prv, tag=TAG)
         chunks[recv_idx] = combine(chunks[recv_idx], got, op, comm.fmt)
+        comm.note_operation_complete("sum")      # real SUM on the chunk
         comm.sync_round(rnd)
 
     # ---- Phase 2: allgather ----------------------------------------------
@@ -57,6 +58,7 @@ def ring_allreduce(comm, value, op="sum", root=0):
         cur = comm.recv(source=prv, tag=TAG)
         cur_idx = (cur_idx - 1) % P
         final[cur_idx] = cur
+        comm.note_operation_complete("copy")     # real COPY of the chunk
         comm.sync_round(rnd)
 
     if isinstance(value, (bytes, bytearray)):

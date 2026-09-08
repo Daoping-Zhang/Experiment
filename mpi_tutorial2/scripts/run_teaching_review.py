@@ -12,16 +12,22 @@ Builds a review package with this layout:
         ├── REVIEW_NOTES.md
         ├── GIT_INFO.txt
         ├── TEST_RESULTS.txt
+        ├── TIMING_AUDIT.md
+        ├── WORKER_FLOW.md
         ├── source/
         │   └── mpi_tutorial2_src.tar.gz        (git archive HEAD)
         ├── teaching/
-        │   ├── naive_allreduce/{teacher,rank1..3}.log
-        │   ├── tree_allreduce/  {teacher,rank1..3}.log
-        │   └── ring_allreduce/  {teacher,rank1..3}.log
-        └── benchmark/
-            ├── benchmark_summary.txt
-            ├── benchmark.csv
-            └── raw/teacher.log
+        │   ├── naive_allreduce/{teacher,rank1..3,rank0_local_excerpt}.log/.txt
+        │   ├── tree_allreduce/  ...
+        │   └── ring_allreduce/  ...
+        ├── benchmark/
+        │   ├── benchmark_summary.txt
+        │   ├── benchmark.csv
+        │   └── raw/teacher.log
+        └── tests/
+            ├── test_smoke.txt, test_round_behavior.txt,
+            ├── test_teaching_semantics.txt, test_timing_worker.txt,
+            └── verify.txt
 
 Then prints the archive path. Standard library only.
 """
@@ -52,118 +58,136 @@ Base commit:
 
 ## What changed
 
-Teaching Mode presentation layer (no collectives/*.py changes, no new
-architecture):
+Two final semantics rounds on top of the Teaching-View refactor:
 
-* New minimpi/teaching.py — pure presentation semantics shared by teacher and
-  workers: per-algorithm phase / round mapping (e.g. Tree AllReduce P=4:
-  rounds 1-2 `Phase 1: Reduce`, rounds 3-4 `Phase 2: Broadcast`; Ring: 3x
-  Reduce-Scatter then 3x AllGather), the Ring chunk schedule (identical
-  arithmetic to collectives/ring_allreduce.py), bounded vector preview, and
-  the per-round local semantics BEFORE / SEND / RECEIVE / OPERATION / AFTER.
+* Timing is now a true synchronization model, not send-vs-round:
+  - Student Local Clock (per rank, own clock, ms from its own Round Start):
+    Send / Receive / SUM / COPY / Local Work Completed At. Every timestamp is
+    recorded at the REAL operation site (World.send/recv return;
+    `comm.note_operation_complete("sum"|"copy")` one line after the real
+    combine()/copy in the collectives — observability only, algorithm
+    unchanged; world.sync_round() fixes Local Work Completed immediately at
+    the end of the algorithm work, before UI printing / event upload, so the
+    timing boundary is never polluted (tests F/B/P).
+  - Teacher Rank-0 single clock: per teaching round the teacher observes when
+    each rank's barrier token arrives (stamped on the ROOT's clock by the
+    transport reader thread) plus its own local-work-done instant, then shows
 
-  Precise data model: the local views are RECONSTRUCTED from each rank's real
-  communication events (send value_before / recv value_after) and its real
-  initial data, applying the same operation semantics as the collectives
-  (presentation-side replay; collective internals are not instrumented and
-  no collective file was changed).
-* Ring AllGather presentation: during AllGather the rank's own vector does
-  not change (the module assembles the result internally), so the local view
-  shows the thing that really grows — MY REDUCED CHUNK, per-round SEND /
-  RECEIVE of already-reduced chunks, "COPY Chunk k into AllGather result",
-  a COLLECTED RESULT table (Chunk 0..P-1, "-" = not yet) and "n / P chunks
-  collected", ending with the full Final vector at 4/4.
-* Teacher (rank 0) is a real MPI participant and now shows, per teaching
-  round, the fixed 4-part view: 1) GLOBAL COMMUNICATION (who->whom, payload
-  size, Ring chunk ids) + OPERATIONS summary, 2) RANK 0 LOCAL VIEW (real
-  rank-0 data), 3) TIMING (only ranks that really sent; Whole Round
-  Finished), 4) Teacher Control ([ENTER] pacing, never inside round time).
-* Start Barrier is visible in Teaching Mode: students print "Local data
-  ready / Entering MPI Barrier...", rank 0 prints the barrier block and
-  waits for ENTER before record_start() — the pause never enters Round 1 or
-  Collective Time.
-* Student terminal per round: Algorithm / Phase / Round x/y / Rank, My Role
-  (Sender / Receiver / +Reduce / +Copy / explicit Idle), BEFORE, SEND,
-  RECEIVE, OPERATION (SUM/COPY with the real arithmetic), AFTER, TIMING
-  (My Send Finished / N/A) and "Waiting for the whole round...".
-* Final blocks: Collective Complete (allreduce: Result + same-on-all-ranks;
-  reduce: only root owns the result). Performance Mode prints none of the
-  teaching state.
+        TIMING — Rank 0 Observation
+        Rank r ready at: ... ms | wait for others: ... ms
+        Whole Round Finished: ...
+
+    All from one clock, so wait_for_others == whole - ready is meaningful
+    (Test N), and a slow rank is visible (Test O, ~1 s delay -> its ready is
+    ~1 s later and the other three report ~1 s wait).
+  - `ready` is documented as "observed at rank 0" (includes a tiny token
+    transmission), never "finished exactly at".
+* worker.py main flow is now a student-readable real MPI program:
+  Init -> COMM_WORLD/rank/size -> wait_for_run() -> input -> data ->
+  comm.Barrier() -> collective -> result -> repeat -> Finalize. Control-plane
+  reading moved to minimpi/classroom_worker.py (one queue; main thread
+  executes RUNs sequentially — no daemon callbacks, no `M._session` in
+  worker.py, no passive wait loop). See WORKER_FLOW.md.
 
 ## Teacher View
 
-Global View:
-GLOBAL COMMUNICATION shows only topology edges: "Rank a -> Rank b <bytes>"
-(+ "Chunk k" for Ring). OPERATIONS lists data-changing receives per rank
-("+ SUM" / "+ COPY"). No other rank's full buffer is printed.
-
-Rank 0 Local View:
-Per teaching round the teacher shows its OWN real data with the same
-Before/Send/Receive/Operation/After model as students (built from real
-rank-0 execution events, verified against the final real result).
+Global Communication + Rank 0 Local View (unchanged, §previous round): edges
+with payload size and Ring chunk ids, OPERATIONS +SUM/+COPY, real rank-0
+BEFORE/SEND/RECEIVE/OPERATION/AFTER. Timing section is now the Rank-0
+Observation barrier-arrival table (above).
 
 ## Student View
 
-Before / Send / Receive / Operation / After:
-Same model on the student terminal; payload values come from the real send
-/ recv records (not from a UI-side mock). Vectors are previewed (<= 8
-elements) with an element count for large data.
+Same BEFORE/SEND/RECEIVE/OPERATION/AFTER local semantics; the timing block is
+now `TIMING — Local Clock` with only the Completed-At events that really
+happened this round (e.g. receiver+reduce shows Receive / SUM / Local Work
+Completed At) and "Waiting at round synchronization...".
 
 ## Tree
 
-Reduce / Broadcast:
-P=4 Tree AllReduce prints Round 1/4 & 2/4 as `Phase 1: Reduce`, Round 3/4 &
-4/4 as `Phase 2: Broadcast`. Rank-0 local view round 1: Before [1,1,1,1],
-Receive [2,2,2,2] (from rank 1), After [3,3,3,3]. Ranks that already sent
-show explicit "My Role: Idle" on intermediate rounds.
+Reduce / Broadcast phase labels and real rank-0 semantics unchanged.
 
 ## Ring
 
-Reduce-Scatter / AllGather:
-P=4 -> 6 rounds: 3x Reduce-Scatter then 3x AllGather. Global view labels
-each message with its Chunk id (e.g. "Rank 3 -> Rank 0    Chunk 3    4 B").
-Reduce-Scatter shows real SUM arithmetic on the received chunk
-("4 + 3 = 7"); AllGather shows COPY semantics, never SUM.
-
-Chunk semantics:
-Ring chunk indices are computed by the presentation layer with the exact
-schedule of collectives/ring_allreduce.py (send_idx=(rank-step)%P in RS;
-owned=(rank+1)%P in AG), so the labels match what the algorithm really
-moves.
+Reduce-Scatter shows real chunk SUM arithmetic (Send/Receive Completed At +
+SUM Completed At on the local clock); AllGather shows MY REDUCED CHUNK +
+COLLECTED RESULT table (COPY Completed At) ending with the Final vector.
 
 ## Start Barrier
 
-Teaching Mode prints a Start Barrier block ("Waiting for all ranks... / All
-ranks ready.") and the teacher presses ENTER before the collective starts;
-record_start() happens after ENTER, so the pause is excluded from Round 1
-and Collective Time. Start Barrier stays an AllReduce-of-1 (MiniMPI
-teaching implementation).
+Visible in Teaching Mode; teacher ENTER happens before record_start() so the
+pause never enters Round 1 / Collective Time.
 
 ## Performance Mode
 
-No BEFORE/AFTER/MY ROLE/CHUNK/GLOBAL COMMUNICATION/OPERATIONS/Whole Round
-Finished/Start Barrier text is printed; benchmark measures Collective Time
-(Start Barrier complete -> all ranks done) and Session wall time.
+No teaching state printed; the local timeline and ready observation are only
+recorded when mode == teaching (detailed timings never go over the control
+plane).
 
 ## Tests
 
-Run via scripts/run_teaching_review.py (see TEST_RESULTS.txt):
-- tests/test_smoke.py
-- tests/test_round_behavior.py  (A-F)
-- tests/test_teaching_semantics.py (G-K)
-- scripts/verify.py
+scripts/run_teaching_review.py runs: test_smoke, test_round_behavior (A-F),
+test_teaching_semantics (G-K), test_timing_worker (L-S), verify.py.
+Real outputs are in TEST_RESULTS.txt and tests/*.txt.
 
 ## Remaining Issues
 
-* Per-rank "My Send Finished" uses each rank's own clock; Whole Round
-  Finished uses the teacher clock (fine on one machine / classroom LAN).
-* Benchmark rows in this package are single runs per size (for the class
-  performance experiment the runner should later use 3 runs / median).
-* The Barrier is a star-shaped AllReduce-of-1 (teaching implementation, not
-  production MPI's barrier algorithm).
+* Student Local Clock values are per-rank clocks; the teacher Ready table is
+  the rank-0 clock — the two are never subtracted across clocks (README).
+* Remote "ready at" includes a small token transmission observed at rank 0.
+* Barrier is a star-shaped AllReduce-of-1 teaching implementation.
+* Benchmark rows are single runs per size (class experiment runner should
+  use 3 runs / median when the PPT is prepared).
+"""
+
+WORKER_FLOW_TEMPLATE = """# WORKER_FLOW.md — how worker.py reads
+
+The final student-facing main program (excerpt, kept in sync with
+worker.py):
+
+```python
+{snippet}
+```
+
+## Mental model
+
+    MPI.Init(server)               # 1  one MPI session (connect/join)
+    comm = MPI.COMM_WORLD          # 2  the world communicator
+    rank / size                    # 3  my identity
+    for each RUN:
+        run = classroom.wait_for_run()   # 4  wait for the teacher (blocking,
+                                         #    meaningful wait — no busy loop)
+        value = read_one_integer()       # 5  I type one integer
+        data = [value] * run.data_size   # 6  my local data vector
+        comm.Barrier()                   # 7  Start Barrier (all ranks ready)
+        result = run_one_collective(...) # 8  the real collective
+        show_result(result)              # 9  my result
+    MPI.Finalize()                 # 10 end the MPI session
+
+## Boundaries
+
+* MPI API stays MPI: Init / COMM_WORLD / Get_rank / Get_size / Barrier /
+  Send / Recv / Reduce / AllReduce / Finalize. No fake MPI classroom API.
+* The classroom control plane (teacher -> RUN/SHUTDOWN) is teaching
+  infrastructure only: it lives in minimpi/classroom_worker.py, hidden from
+  the student-facing main flow (no M._session, no daemon worker in
+  worker.py).
+* Each RUN is executed on the worker MAIN thread, one after another — a
+  second RUN can never overlap the first.
 """
 
 
+def build_worker_flow():
+    src = open(os.path.join(MPI_TUTORIAL, "worker.py")).read()
+    i = src.find("def main():")
+    j = src.find("# helpers below")
+    if j < 0:
+        j = len(src)
+    snippet = src[i:j].rstrip()
+    return WORKER_FLOW_TEMPLATE.format(snippet=snippet)
+
+
+# --------------------------------------------------------------------------
 def sh(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
@@ -175,6 +199,11 @@ def free_port():
     port = s.getsockname()[1]
     s.close()
     return port
+
+
+def rank_of_worker(out):
+    m = re.search(r"Rank:\s*(\d+)\s*/\s*\d+", out)
+    return int(m.group(1)) if m else None
 
 
 def run_demo(out_dir, demo, timeout=180):
@@ -217,18 +246,18 @@ def run_demo(out_dir, demo, timeout=180):
     # each log after the rank its worker really printed ("Rank: 2 / 4").
     written = {}
     for o in w_out:
-        m = re.search(r"Rank:\s*(\d+)\s*/\s*\d+", o)
-        rk = int(m.group(1)) if m else None
+        rk = rank_of_worker(o)
         if rk is not None:
             written[rk] = o
     for rk in sorted(written):
         open(os.path.join(out_dir, "rank%d.log" % rk), "w").write(written[rk])
-    if len(written) < len(w_out):
-        open(os.path.join(out_dir, "NOTE.txt"), "w").write(
-            "WARNING: %d worker logs could not be matched to a real rank "
-            "(join-order race) — see raw outputs below.\n\n%s"
-            % (len(w_out) - len(written), "\n".join(w_out)))
-    return not timed
+    # rank-0 local-view excerpt (first round) for quick human review
+    i = t_out.find("RANK 0 LOCAL VIEW")
+    if i >= 0:
+        j = t_out.find("All ranks finished Round 1", i)
+        open(os.path.join(out_dir, "rank0_local_excerpt.txt"), "w").write(
+            t_out[i:j if j >= 0 else i + 1600])
+    return not timed, t_out
 
 
 def run_benchmark(out_dir, timeout=300):
@@ -295,8 +324,7 @@ def run_cmd_capture(tag, argv, timeout=600):
         out = "[TIMEOUT after %ds]\n" % timeout
     except Exception as e:  # noqa: BLE001
         out = "[ERROR] %s\n" % e
-    return "--- %s ---\n$ %s\n%s\n" % (
-        tag, " ".join(argv), out)
+    return "--- %s ---\n$ %s\n%s\n" % (tag, " ".join(argv), out)
 
 
 def git_info():
@@ -310,58 +338,121 @@ def git_info():
     return "\n".join(lines)
 
 
+def write_timing_audit(pkg, teacher_log_path):
+    """TIMING_AUDIT.md: real numbers from the first teaching round captured,
+    plus the student-vs-teacher clock explanation."""
+    log = open(teacher_log_path).read() if os.path.exists(teacher_log_path) else ""
+    rows = []
+    whole = None
+    i = log.find("TIMING — Rank 0 Observation")
+    if i >= 0:
+        seg = log[i:]
+        for ln in seg.splitlines():
+            m = re.search(
+                r"Rank (\d+) ready at:\s+([0-9.]+) ms \| wait for others:\s+"
+                r"([0-9.]+) ms", ln)
+            if m:
+                rows.append((int(m.group(1)), m.group(2), m.group(3)))
+            m2 = re.search(r"Whole Round Finished:\s*([0-9.]+)\s*ms", ln)
+            if m2:
+                whole = m2.group(1)
+                break
+    lines = ["# TIMING_AUDIT.md — real Round from the captured tree_allreduce run",
+             "", "Teacher Round Start: 0.000 ms (Round Start on the rank-0 clock)",
+             ""]
+    if not rows:
+        lines.append("(no timing block found in log)")
+    else:
+        for rk, m, w in rows:
+            tag = "  (rank 0 == teacher's own local-work-done instant)"
+            lines.append("Rank %s Ready: %s ms   wait for others: %s ms%s"
+                         % (rk, m, w, tag if rk == 0 else ""))
+        lines.append("")
+        lines.append("Whole Round: %s ms" % (whole or "n/a"))
+        lines.append("")
+    lines += [
+        "## Student Local Clock vs Teacher Rank-0 Observation Clock",
+        "",
+        "Student `TIMING — Local Clock`: each rank measures its OWN send /",
+        "recv / SUM / COPY / Local-Work Completed At on ITS OWN clock, ms from",
+        "its own Round Start. Those values are for understanding the rank's",
+        "own execution phases and are NEVER subtracted across clocks.",
+        "",
+        "Teacher `TIMING — Rank 0 Observation`: rank 0 stamps, on ITS OWN",
+        "single clock, when it observes each rank reach the round barrier",
+        "(its barrier token arriving at rank 0's transport) plus its own",
+        "local-work-done instant. wait_for_others == Whole - ready is only",
+        "valid INSIDE this table (same clock); it answers \"who is waiting",
+        "for whom\" and \"what the whole round really waited for\".",
+        "",
+        "Do not compute  TeacherReady - StudentLocalWork  across clocks.",
+    ]
+    open(os.path.join(pkg, "TIMING_AUDIT.md"), "w").write("\n".join(lines) + "\n")
+
+
 def main():
     # --- working dir ------------------------------------------------------
     tmp = tempfile.mkdtemp(prefix="minimpi_review_")
     pkg = os.path.join(tmp, "review_package")
     os.makedirs(os.path.join(pkg, "source"))
     os.makedirs(os.path.join(pkg, "benchmark", "raw"))
+    os.makedirs(os.path.join(pkg, "tests"))
     for demo in ("naive_allreduce", "tree_allreduce", "ring_allreduce"):
         os.makedirs(os.path.join(pkg, "teaching", demo))
 
     head = sh(["git", "rev-parse", "HEAD"], cwd=REPO).stdout.strip()
     base = sh(["git", "rev-parse", "HEAD~1"], cwd=REPO).stdout.strip()
 
-    print("[1/6] source archive ...")
+    print("[1/7] source archive ...")
     sh(["git", "archive", "HEAD", "mpi_tutorial2",
         "-o", os.path.join(pkg, "source", "mpi_tutorial2_src.tar.gz")],
        cwd=REPO)
 
-    print("[2/6] teaching logs (naive / tree / ring allreduce) ...")
+    print("[2/7] teaching logs (naive / tree / ring allreduce) ...")
+    tree_log = None
     for demo in ("naive_allreduce", "tree_allreduce", "ring_allreduce"):
-        ok = run_demo(os.path.join(pkg, "teaching", demo), demo)
+        ok, t_out = run_demo(os.path.join(pkg, "teaching", demo), demo)
+        if demo == "tree_allreduce":
+            tree_log = os.path.join(pkg, "teaching", demo, "teacher.log")
         print("   %-16s %s" % (demo, "ok" if ok else "TIMED OUT"))
 
-    print("[3/6] benchmark ...")
+    print("[3/7] benchmark ...")
     run_benchmark(os.path.join(pkg, "benchmark"))
 
-    print("[4/6] tests ...")
-    results = []
-    results.append(run_cmd_capture("test_smoke.py",
-                                   [PY, "tests/test_smoke.py"], 300))
-    results.append(run_cmd_capture("test_round_behavior.py",
-                                   [PY, "tests/test_round_behavior.py"], 420))
-    results.append(run_cmd_capture("test_teaching_semantics.py",
-                                   [PY, "tests/test_teaching_semantics.py"], 420))
-    results.append(run_cmd_capture("verify.py",
-                                   [PY, "scripts/verify.py"], 900))
+    print("[4/7] tests ...")
+    suites = [
+        ("test_smoke", [PY, "tests/test_smoke.py"], 300),
+        ("test_round_behavior", [PY, "tests/test_round_behavior.py"], 420),
+        ("test_teaching_semantics", [PY, "tests/test_teaching_semantics.py"],
+         420),
+        ("test_timing_worker", [PY, "tests/test_timing_worker.py"], 600),
+        ("verify", [PY, "scripts/verify.py"], 900),
+    ]
+    combined = []
+    for name, argv, to in suites:
+        out = run_cmd_capture(name, argv, timeout=to)
+        combined.append(out)
+        open(os.path.join(pkg, "tests", name + ".txt"), "w").write(
+            out + "\n")
 
-    print("[5/6] review notes / git info / test results ...")
+    print("[5/7] review notes / git info / test results ...")
     open(os.path.join(pkg, "REVIEW_NOTES.md"), "w").write(
         REVIEW_NOTES.format(commit=head, base=base))
     open(os.path.join(pkg, "GIT_INFO.txt"), "w").write(git_info())
     open(os.path.join(pkg, "TEST_RESULTS.txt"), "w").write(
         "Generated: %s\n\n%s" % (time.strftime("%Y-%m-%d %H:%M:%S"),
-                                 "\n".join(results)))
+                                 "\n".join(combined)))
+    open(os.path.join(pkg, "WORKER_FLOW.md"), "w").write(build_worker_flow())
+    write_timing_audit(pkg, tree_log)
 
-    print("[6/6] tar.gz ...")
+    print("[6/7] tar.gz ...")
     ts = time.strftime("%Y%m%d_%H%M%S")
     out_name = "minimpi_tutorial2_review_%s_%s.tar.gz" % (head[:12], ts)
     out_path = os.path.join(REPO, out_name)
     with tarfile.open(out_path, "w:gz") as tf:
         tf.add(pkg, arcname="review_package")
     shutil.rmtree(tmp, ignore_errors=True)
-    print("\nReview package generated:\n\n%s\n" % out_path)
+    print("[7/7] done\n\nReview package generated:\n\n%s\n" % out_path)
     return 0
 
 

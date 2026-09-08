@@ -38,14 +38,17 @@ BASE_TAG = P.BARRIER_TAG_BASE   # barrier tag = BARRIER_TAG_BASE + rnd
 
 
 def barrier(comm, rnd, on_root_gathered=None, on_root_ready=None,
-            on_arrived=None):
+            on_arrived=None, on_root_arrival=None):
     """Blocking data-plane AllReduce-of-1 barrier (MiniMPI teaching impl).
 
     Every rank contributes 1; rank 0 reduces them to world_size and
     broadcasts it back. Returns the reduced total (= world_size when every
     rank arrived).
 
-    root: recv [1] from every rank
+    root: recv [1] from every rank (per source, in rank order)
+              -> on_root_arrival(src, arrival_ns)  for each token, where
+                 arrival_ns is stamped on the ROOT's clock when the frame
+                 reached its transport (rank-ready observation)
               -> on_root_gathered(rnd)   (all ranks finished this round)
               -> on_root_ready(rnd)      (teacher display / ENTER pause)
           broadcast [world_size] to every rank
@@ -59,11 +62,13 @@ def barrier(comm, rnd, on_root_gathered=None, on_root_ready=None,
     tag = BASE_TAG + rnd
     if comm.rank == root:
         total = 1                     # root's own contribution
-        for _ in range(1, comm.size):
-            token = comm.recv(source=P.ANY_SOURCE, tag=tag, fmt="i32",
+        for src in range(1, comm.size):
+            token = comm.recv(source=src, tag=tag, fmt="i32",
                               algo="teaching-barrier", phase="sync-wait",
                               rnd=rnd, kind=P.KIND_BARRIER)
             total += int(token[0]) if token else 1
+            if on_root_arrival is not None:
+                on_root_arrival(src, getattr(comm, "last_arrival_ns", None))
         if on_root_gathered is not None:
             on_root_gathered(rnd)
         if on_root_ready is not None:
