@@ -1,13 +1,11 @@
 CC      = mpicc
-CFLAGS  = -O2 -Wall
-TARGETS = reduce_allreduce_demo allreduce_benchmark
+CFLAGS  = -O2 -Wall -Wextra
+TARGETS = bcast_example scatter_example gather_example \
+          reduce_example allreduce_example barrier_example
 
 all: $(TARGETS)
 
-reduce_allreduce_demo: reduce_allreduce_demo.c
-	$(CC) $(CFLAGS) -o $@ $<
-
-allreduce_benchmark: allreduce_benchmark.c
+%_example: %_example.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 clean:

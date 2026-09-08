@@ -1,205 +1,141 @@
-# Assignment 1 — MPI Reduce & AllReduce (C-only)
+# Assignment 1 — Parallel GEMM with MPI
 
 > 中文版: [README.md](./README.md)
 
-This is the first "Implement" step of the learning loop
-**Understand → Run → Implement → Self-test → Auto-grade**.
+This round is only the **task definition**: implement parallel matrix
+multiplication `C = A × B` in **C + MPI**. Grading rubric / hidden grading /
+performance scores are **defined in a later round** (not part of this one).
 
-Goal (very simple):
+## 1. Computational task
 
-> Given the local vectors of P ranks, write a program in **C + MPI** where
-> every rank reads its own data, performs **Reduce (SUM → root = rank 0)**
-> and **AllReduce (SUM → every rank)**, and prints the result in the unified
-> Output Contract. Ring/Tree/Recursive Doubling/Chunk/performance tuning are
-> NOT required; any internal implementation is allowed (direct
-> `MPI_Reduce/MPI_Allreduce`, or your own `MPI_Send/MPI_Recv`).
+$$C = A \times B$$
 
-## 1. Programming Language
+| Matrix | Dimensions | Data type |
+|---|---|---|
+| A | M × K | int |
+| B | K × N | int |
+| C | M × N | int |
 
-Assignment 1 must be implemented in **C** using MPI.
-Your program will be compiled using `mpicc` and executed using `mpirun` on
-the official course server.
+## 2. Parallelisation idea (teaching background: 1D row partitioning)
 
-| Language | Submission contents |
-|---|---|
-| C + MPI (the only student language) | `solution.c` + `build.sh` + `run.sh` (`README.md` optional, not graded) |
-
-> Python / C++ / mpi4py are no longer student submission languages.
-> Python is only used by the instructor-provided tools:
-> `check.py` / `check_submission.py` / the grader.
-
-## 2. Official Grading Environment
+Simplest row-wise split:
 
 ```text
-OS:             Linux
-MPI Runtime:    Open MPI 4.1.2
+Matrix A
+  rows 0..x   → Rank 0
+  rows x..y   → Rank 1
+  ...
+```
+
+Every rank:
+
+```text
+local_C = local_A × B
+```
+
+Finally combine the ranks' `local_C` into the full C.
+
+Recommended (not required) collective flow:
+
+```text
+Rank 0 reads A and B
+        ↓
+MPI_Bcast   → share Matrix B (and M/K/N)
+        ↓
+MPI_Scatter → distribute rows of A
+        ↓
+Local Matrix Multiplication
+        ↓
+MPI_Gather  → collect local C
+        ↓
+Rank 0 obtains final C
+```
+
+## 3. Environment
+
+```text
+OS:             Linux (official grading server)
+MPI Runtime:    Open MPI 4.1.2 (any compatible MPI is fine for local dev)
 MPI Launcher:   mpirun
 C Compiler:     mpicc
 Language:       C
 ```
 
-You may develop locally with any compatible MPI (MPICH / Open MPI), but:
-
-> Final grading is performed on the official course server.
-
-There is no requirement to install Open MPI 4.1.2 locally.
-
-## 3. Submission Contract (all three files required)
-
-```text
-student_submission/
-├── solution.c     REQUIRED
-├── build.sh       REQUIRED
-└── run.sh         REQUIRED
-```
-
-- `build.sh`: only compiles with `mpicc` (never calls mpirun, never runs
-  tests, never downloads dependencies, never modifies the system).
-  Template:
-
-  ```bash
-  #!/bin/bash
-  set -e
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  mpicc -O2 "$SCRIPT_DIR/solution.c" -o "$SCRIPT_DIR/solution"
-  ```
-
-- `run.sh`: only launches the local program instance for one MPI rank.
-  Calling `mpirun`/`mpiexec` inside it is **forbidden** (the outer layer
-  runs `mpirun -n P ./run.sh input.txt`). Template:
-
-  ```bash
-  #!/bin/bash
-  set -e
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  exec "$SCRIPT_DIR/solution" "$@"
-  ```
-
-> If you later split into several `.c/.h` files, adjust `build.sh` yourself;
-> the checker/grader fixes the **build.sh interface**, not "must be a
-> single solution.c".
-
 ## 4. Input format
 
 ```text
-P N
-vector_for_rank_0      # N integers
-vector_for_rank_1
+M K N
+<Matrix A: M rows, K ints each>
+<Matrix B: K rows, N ints each>
+```
+
+Example (B = Identity, so C = A — easy to verify by hand):
+
+```text
+4 4 4
+1 2 3 4
+5 6 7 8
+9 10 11 12
+13 14 15 16
+1 0 0 0
+0 1 0 0
+0 0 1 0
+0 0 0 1
+```
+
+## 5. Output (only rank 0 prints the final C, straight to stdout)
+
+```text
+RESULT M N
+<row 0>
 ...
-vector_for_rank_P-1
+<row M-1>
 ```
 
 Example:
 
 ```text
-4 8
-1 2 3 4 5 6 7 8
-2 3 4 5 6 7 8 9
-3 4 5 6 7 8 9 10
-4 5 6 7 8 9 10 11
+RESULT 4 4
+1 2 3 4
+5 6 7 8
+9 10 11 12
+13 14 15 16
 ```
 
-Row r is **rank r's** local vector (length N). How you read the file is up
-to you: every rank opens it and reads its own row / rank 0 reads everything
-and distributes with MPI / any other reasonable approach.
+No TIME_MS / Speedup / Efficiency output is required this round.
 
-## 5. What to do
-
-- **Reduce**: `SUM`, root = rank 0. Only rank 0 prints the result.
-  Example: `[1 2 3 4] [2 3 4 5] [3 4 5 6] [4 5 6 7]` → `[10 14 18 22]`.
-- **AllReduce**: `SUM`; every rank ends with `[10 14 18 22]` and prints it.
-
-## 6. Output contract (strict)
-
-Use `printf(...)` to print to **stdout**. No output.txt / result.txt is
-needed. Result lines must match exactly (debug output allowed, but each
-result line may appear only once):
-
-```text
-REDUCE rank=0: 10 14 18 22
-
-ALLREDUCE rank=0: 10 14 18 22
-ALLREDUCE rank=1: 10 14 18 22
-ALLREDUCE rank=2: 10 14 18 22
-ALLREDUCE rank=3: 10 14 18 22
-```
-
-- MPI stdout order is not guaranteed — the checker parses by
-  `operation + rank`, ignoring order.
-- `REDUCE rank=0` exactly once; each `ALLREDUCE rank=X` exactly once.
-- Duplicates = malformed output = FAIL.
-- Saving stdout manually is optional (debug):
-  `mpirun -n 4 ./run.sh input.txt > output.txt`.
-
-## 7. Local self-test (Recommended)
-
-### Step 1 — Clone
+## 6. Local self-test (manual; an automated checker comes later)
 
 ```bash
-git clone https://github.com/Daoping-Zhang/Experiment.git
-cd Experiment/mpi_tutorial2/assignment1
-```
-
-### Step 2 — Create your submission
-
-```text
-my_assignment1/
-├── solution.c
-├── build.sh
-└── run.sh
-```
-
-### Step 3 — One-command self-test (recommended)
-
-```bash
-python3 check_submission.py ./my_assignment1
-```
-
-### Step 4 — Manual run (optional)
-
-```bash
-cd my_assignment1
+cd examples/c_template   # or your own submission directory
 ./build.sh
-mpirun -n 4 ./run.sh ../demo_input.txt
+mpirun -n 4 ./run.sh ../../demo_input.txt
 ```
 
-The checker reads the input and computes the expected values itself (it
-never depends on an expected file), so any input works:
+Compare with `demo_expected.txt`.
 
-```bash
-python3 check.py demo_input.txt output.txt
-```
-
-### Template (starting point — TODO skeleton only, no answer)
+## 7. Starter
 
 ```text
-examples/c_template/    # solution.c + build.sh + run.sh (TODO)
+assignment1/
+├── README.md
+├── demo_input.txt
+├── demo_expected.txt
+└── examples/c_template/
+    ├── solution.c      # TODO only (1..6)
+    ├── build.sh
+    └── run.sh
 ```
 
-### Classroom checker demo (no correct submission is published)
+The template `solution.c` only lists TODOs: MPI init → rank 0 reads
+matrices → distribute data → local matrix multiply → collect the result →
+print. No complete `MPI_Bcast/MPI_Scatter/MPI_Gather` answer is provided.
 
-```bash
-python3 check.py demo_input.txt examples/demo_output.txt
-```
+> You may find Bcast, Scatter and Gather useful.
 
-→ `Overall: PASS`. Grading keeps the interface and checker rules identical;
-only the input cases change.
+## 8. Open items (a separate future round)
 
-## 8. Grading principles (transparent)
-
-- Public and Hidden flows are **identical**:
-  `input → build.sh → mpirun -n P ./run.sh → stdout → check.py`; the only
-  difference is the input data.
-- Hidden cases: P=4, N=4/8/16/32/128, values [-20,20] (positives, negatives,
-  zeros), fixed seeds; hidden values / seeds / the full case set are **not
-  published**.
-- A timeout (e.g. 10 s) kills the whole mpirun process group and counts as
-  TIMEOUT.
-
-## 9. Submission
-
-```bash
-zip -r student_id_assignment1.zip my_assignment1/
-```
-
-Submit only the archive (`solution.c` + `build.sh` + `run.sh`).
+- grading rubric / score split
+- hidden cases and input ranges
+- whether performance / scaling is scored
+- automated checker (check.py / grader)

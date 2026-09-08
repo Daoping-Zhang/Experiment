@@ -25,10 +25,8 @@ mpi_tutorial2/classroom_minimpi/manual_classroom_logs/
 
 # Assignment 1 — instructor-only (never pushed to the student repo)
 mpi_tutorial2/assignment1_grader/
-mpi_tutorial2/real_mpi/reduce_allreduce_demo
-mpi_tutorial2/real_mpi/allreduce_benchmark
-mpi_tutorial2/real_mpi/results.csv
 mpi_tutorial2/assignment1/examples/c_template/solution
+mpi_tutorial2/real_mpi/*_example
 
 # macOS
 .DS_Store
