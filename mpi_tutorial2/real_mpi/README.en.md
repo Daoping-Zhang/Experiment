@@ -87,6 +87,13 @@ ranks,bytes,time_ms
 > *Advanced MPI implementations may select among algorithms such as
 > recursive doubling, ring, pipelined algorithms, and others.*
 
+## Language linkage
+
+Assignment 1 and this demo share the same stack: **C + MPI (mpicc/mpirun)**.
+Classroom chain: MiniMPI (Python, understand) → Real MPI Demo (C, connect
+to reality) → Assignment 1 (C, implement it yourself). Python is only used
+by course tools — never as a student submission language.
+
 ## 4. Environment needed
 
 - any MPI (Open MPI / MPICH …): `mpicc` / `mpirun` on PATH

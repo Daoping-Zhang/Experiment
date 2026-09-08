@@ -29,3 +29,6 @@ mpi_tutorial2/real_mpi/reduce_allreduce_demo
 mpi_tutorial2/real_mpi/allreduce_benchmark
 mpi_tutorial2/real_mpi/results.csv
 mpi_tutorial2/assignment1/examples/c_template/solution
+
+# macOS
+.DS_Store

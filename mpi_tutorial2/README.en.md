@@ -33,3 +33,25 @@ Understand (MiniMPI Classroom)
 
 See each sub-folder's `README.md` for details. MiniMPI
 (`classroom_minimpi/`) itself is frozen; this layer is organisation only.
+
+## Language & roles (so students are not confused)
+
+```text
+① classroom_minimpi/   Python-based teaching visualization (understand patterns)
+② assignment1/         Student assignment = C + MPI (the only student language)
+③ real_mpi/            Native C + MPI demos and benchmark
+```
+
+- MiniMPI is a Python teaching system used to VISUALIZE communication
+  patterns;
+- **Assignment 1 and Real MPI both use native C MPI APIs**;
+- Python is used only by the course tools and the auto-grader
+  (check.py / grader) — it is NOT a student submission language.
+
+```text
+Classroom MiniMPI  →  Understand
+Real MPI Demo (C)  →  Connect to Reality
+Assignment 1 (C)   →  Implement
+Public Checker     →  Self-test
+Private Grader     →  Grade
+```

@@ -83,6 +83,12 @@ ranks,bytes,time_ms
 > *Advanced MPI implementations may select among algorithms such as
 > recursive doubling, ring, pipelined algorithms, and others.*
 
+## 语言衔接
+
+Assignment 1 与本节 Demo 使用同一套栈：**C + MPI（mpicc / mpirun）**。
+课堂链路：MiniMPI（Python，看懂）→ Real MPI Demo（C，对接现实）→
+Assignment 1（C，自己实现）。Python 只用于教师工具，不是学生提交语言。
+
 ## 4. 需要什么环境
 
 - 任意 MPI（Open MPI / MPICH…）：`mpicc` / `mpirun` 在 PATH 中

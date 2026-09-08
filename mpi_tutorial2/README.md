@@ -30,3 +30,24 @@ mpi_tutorial2/
 
 详细说明分别见各子目录的 `README.md`。MiniMPI（classroom_minimpi/）本身已冻结，
 本层只做组织整理。
+
+## 语言与定位（避免学生困惑）
+
+```text
+① classroom_minimpi/   Python 教学可视化系统（看懂通信 pattern）
+② assignment1/         学生作业 = C + MPI（唯一学生语言）
+③ real_mpi/            原生 C + MPI 的 demo 与 benchmark
+```
+
+- MiniMPI 是"用于可视化通信过程"的 Python 教学系统；
+- **Assignment 1 与 Real MPI 都使用原生 C MPI API**；
+- Python 只用于课程教学工具与自动评分工具（check.py / grader），
+  **不是**学生提交语言。
+
+```text
+Classroom MiniMPI  →  Understand
+Real MPI Demo (C)  →  Connect to Reality
+Assignment 1 (C)   →  Implement
+Public Checker     →  Self-test
+Private Grader     →  Grade
+```
