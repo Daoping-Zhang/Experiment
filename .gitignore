@@ -16,16 +16,16 @@ __pycache__/
 *.zip
 
 # Classroom run logs (teacher/worker outputs)
-mpi_tutorial2/classroom_logs/
+mpi_tutorial2/classroom_minimpi/classroom_logs/
 
 # Teaching-view review capture artifacts (external runs)
-mpi_tutorial2/classroom_review/
-mpi_tutorial2/scripts/run.py
-mpi_tutorial2/manual_classroom_logs/
+mpi_tutorial2/classroom_minimpi/classroom_review/
+mpi_tutorial2/classroom_minimpi/scripts/run.py
+mpi_tutorial2/classroom_minimpi/manual_classroom_logs/
 
 # Assignment 1 — instructor-only (never pushed to the student repo)
 mpi_tutorial2/assignment1_grader/
 mpi_tutorial2/real_mpi/reduce_allreduce_demo
 mpi_tutorial2/real_mpi/allreduce_benchmark
 mpi_tutorial2/real_mpi/results.csv
-mpi_tutorial2/assignment1/examples/demo_c_submission/solution
+mpi_tutorial2/assignment1/examples/c_template/solution

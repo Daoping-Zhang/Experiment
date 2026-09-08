@@ -107,12 +107,20 @@ mpirun -n 4 ./run.sh demo_input.txt > output.txt
 python3 check.py demo_input.txt output.txt
 ```
 
-示例提交（课堂演示用，也可以照着写）：
+模板（起点，含 TODO 骨架；不含答案）：
+
+```text
+examples/python_template/   # run.sh + solution.py（TODO）
+examples/c_template/        # run.sh + build.sh + solution.c（TODO）
+```
+
+课堂演示 checker（不需要公开任何正确提交）：老师/同学在 assignment1 目录运行
 
 ```bash
-python3 check_submission.py examples/demo_python_submission
-python3 check_submission.py examples/demo_c_submission
+python3 check.py demo_input.txt examples/demo_output.txt
 ```
+
+看到 `Overall: PASS`；**评分时老师不会改接口与 checker 规则，只换 input cases**。
 
 ## 6. 评分原则（透明）
 

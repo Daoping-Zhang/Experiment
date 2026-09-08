@@ -49,14 +49,19 @@ def build_if_needed(sub_dir):
 
 
 def run_submission(sub_dir, input_path, timeout=60):
-    """Run `mpirun -n P ./run.sh <input>`; returns (ok, log/reason)."""
+    """Run `mpirun -n P ./run.sh <input>`.
+
+    Returns (ok, reasons, parts, stdout):
+      parts = {'reduce': bool, 'allreduce': {rank: bool}} when the output
+      could be parsed (even if wrong), else None.
+    """
     run_sh = os.path.join(sub_dir, "run.sh")
     if not os.path.exists(run_sh):
-        return False, "run.sh is REQUIRED and missing"
+        return False, ["run.sh is REQUIRED and missing"], None, ""
     os.chmod(run_sh, 0o755)
     build_ok, note = build_if_needed(sub_dir)
     if not build_ok:
-        return False, note
+        return False, [note], None, ""
 
     P, N, rows = read_input(input_path)
     try:
@@ -72,13 +77,13 @@ def run_submission(sub_dir, input_path, timeout=60):
         except Exception:  # noqa: BLE001
             pass
         proc.wait(timeout=10)
-        return False, ("TIMEOUT after %ds — possible MPI deadlock.\n"
-                       "(mpirun process group killed)" % timeout)
+        return False, ["TIMEOUT after %ds — possible MPI deadlock.\n"
+                       "(mpirun process group killed)" % timeout], None, ""
     if not ok:
-        return False, "program exited with %d\n%s" % (proc.returncode,
-                                                      (out or "")[:2000])
+        return False, ["program exited with %d\n%s"
+                       % (proc.returncode, (out or "")[:2000])], None, out
     overall, reasons, parts = check_output(P, N, rows, out)
-    return overall, "\n".join(reasons)
+    return overall, reasons, parts, out
 
 
 def main(argv):
@@ -100,20 +105,21 @@ def main(argv):
     print("Input      : %s  (P=%d N=%d)" % (os.path.basename(input_path),
                                             P, N))
 
-    ok, note = run_submission(sub_dir, input_path)
-    if ok:
-        print("\nExpected REDUCE rank=0: %s" % _fmt(expected))
-        print("\nREDUCE\nPASS\n\nALLREDUCE")
+    ok, reasons, parts, _out = run_submission(sub_dir, input_path)
+    print("\nExpected REDUCE rank=0: %s" % _fmt(expected))
+    print("\nREDUCE")
+    if parts is not None:
+        print("  %s" % ("PASS" if parts["reduce"] else "FAIL"))
+        print("\nALLREDUCE")
         for r in range(P):
-            print("  Rank %d PASS" % r)
-        print("\nOverall: PASS")
-        return 0
-    # re-derive fine-grained parts when output was captured but wrong
-    overall, reasons, parts = (False, [note], {})
-    print("\nOverall: FAIL")
-    for msg in (reasons or [note]):
+            ok_r = parts["allreduce"].get(r)
+            print("  Rank %d %s" % (r, "PASS" if ok_r else "FAIL"))
+    else:
+        print("  n/a (could not run / no output parsed)")
+    print("\nOverall: %s" % ("PASS" if ok else "FAIL"))
+    for msg in (reasons or []):
         print("  ! %s" % msg)
-    return 1
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

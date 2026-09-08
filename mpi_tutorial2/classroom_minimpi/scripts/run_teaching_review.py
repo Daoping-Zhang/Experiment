@@ -42,7 +42,10 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MPI_TUTORIAL = os.path.dirname(HERE)          # .../mpi_tutorial2
-REPO = os.path.dirname(MPI_TUTORIAL)          # git repo root
+# git repo root (works even when the classroom lives in a sub-folder)
+import subprocess as _sp
+REPO = _sp.run(["git", "-C", MPI_TUTORIAL, "rev-parse", "--show-toplevel"],
+               capture_output=True, text=True).stdout.strip()
 PY = sys.executable
 
 # --------------------------------------------------------------------------
