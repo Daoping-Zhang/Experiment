@@ -249,7 +249,11 @@ class Coordinator:
         self.events0.clear()   # rank0 events belong to this RUN only
         params = dict(params, mode=mode, size=self.size)
         params["peers"] = self.peers
-        params["value0"] = params.pop("value0", 1)
+        value0 = params.get("value0", 1)
+        # value0 is ONLY rank 0's own input — workers read theirs themselves.
+        # (In benchmark cases value0 may be raw BYTES, which must never go
+        # over the JSON control channel.)
+        params.pop("value0", None)
 
         print("\nRunning...")
         # Rank-0 (teacher) per-run teaching state: real initial data + a
@@ -260,10 +264,12 @@ class Coordinator:
         if mode == "teaching":
             ds = int(params.get("data_size") or params.get("vector_len") or 0)
             if params.get("fmt", "i32") == "i32" and ds > 0:
-                v0 = int(params.get("value0", 1))
+                v0 = int(value0) if not isinstance(value0, (bytes, bytearray)) \
+                    else 1
                 self.rank0._local_ctx = T.RoundCtx(self.rank0._alg, self.size,
                                                    0, [v0] * ds)
-        self.send_to_workers({"t": P.C_RUN, "params": params})
+        params["value0"] = value0      # rank-0 dispatch arg (local only)
+        self.send_to_workers({"t": P.C_RUN, "params": _without_value0(params)})
         self._start_rank0(agg, params)
         if not agg.wait_all_done(timeout=600):
             print("[TIMEOUT] demo did not finish; done=%s" % sorted(agg.done))
@@ -584,6 +590,14 @@ def _pow2(n):
     return n >= 1 and (n & (n - 1)) == 0
 
 
+def _without_value0(params):
+    """Control-plane form of RUN params: rank 0's own value never crosses
+    the JSON control channel (workers input their own)."""
+    d = dict(params)
+    d.pop("value0", None)
+    return d
+
+
 def _params_for(algo, mode, payload=0, vector_len=0):
     p = {"algorithm": algo, "mode": mode, "op": "sum"}
     if payload:
@@ -604,7 +618,7 @@ def _fmt_value(v):
 
 
 def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True,
-             value0=1, silent=False):
+             value0=1, silent=False, kind=None):
     if algo == "recursive_doubling_allreduce" and not _pow2(coord.size):
         print("[skip] %s requires a power-of-two world size (got %d)" %
               (algo, coord.size))
@@ -627,6 +641,8 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True,
 
     params = _params_for(algo, mode, payload=payload, vector_len=vector_len)
     params["value0"] = value0
+    if kind is not None:
+        params["kind"] = kind
     if not silent:
         print("\n== Demo: %s  mode=%s ==" % (algo, mode))
     if payload:
@@ -726,9 +742,14 @@ def run_benchmark(coord):
     for a in BENCH_ALGORITHMS:
         for b in BENCH_SIZES:
             times = []
+            # every real benchmark case is explicitly a benchmark_case (no
+            # re-prompt on worker) and rank 0 carries its OWN payload bytes
+            # derived from the value entered once at setup.
+            payload0 = collectives_dispatch.make_benchmark_payload(v0, b)
             for k in range(BENCH_RUNS):
                 agg = run_demo(coord, a, "performance", payload=b,
-                               show=False, silent=True)
+                               show=False, silent=True, kind="benchmark_case",
+                               value0=payload0)
                 cms = coord.collective_ms()
                 ms = cms if cms is not None else 0.0
                 times.append(ms)
@@ -756,6 +777,9 @@ def run_benchmark(coord):
         line += ("%7.2f ms" % rows["ring_allreduce"][b]).ljust(widths[3])
         print(line)
     print("\nLower is better.")
+    coord.send_to_workers({"t": P.C_RUN,
+                           "params": {"kind": "benchmark_done",
+                                      "mode": "performance"}})
     print("\nBenchmark Complete.\n\nReturning to Teacher menu...")
 
 

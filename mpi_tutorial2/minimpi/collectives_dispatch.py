@@ -38,6 +38,21 @@ def make_value(params, rank=0):
     return [int(params.get("n_value", 7))]
 
 
+def make_benchmark_payload(value, nbytes):
+    """Encode a rank's typed benchmark value as a raw payload of exactly
+    `nbytes` (all benchmark sizes are multiples of 4 B):
+
+        value 2, 16 B  ->  bytes(struct.pack('!i', 2)) x 4
+
+    The value each rank entered ONCE therefore really participates in the
+    data plane (byte-level benchmarking), while staying cheap for Python.
+    """
+    import struct
+    pattern = struct.pack("!i", int(value))
+    repeats = (nbytes + 3) // 4
+    return (pattern * repeats)[:nbytes]
+
+
 def _load_module(algo):
     """Load a collective module when minimpi is used either as a sub-package
     (in-tree) or as a top-level package (running teacher.py / worker.py)."""
@@ -70,14 +85,22 @@ def run(rt, params, value=None, barrier=True):
                    fmt=params.get("fmt", P.FMT_INT32))
     M.COMM_WORLD = comm
     if value is not None:
-        vl = int(params.get("vector_len") or params.get("data_size") or 0)
-        if vl > 0 and params.get("fmt", P.FMT_INT32) != "raw":
-            if isinstance(value, (list, tuple)):        # pre-built local data
-                value = [int(v) for v in value]
+        # An explicit raw payload (benchmark case) is respected as-is;
+        # everything else goes through the usual builders below.
+        if params.get("fmt", P.FMT_INT32) == P.FMT_RAW:
+            if isinstance(value, (bytes, bytearray)):
+                value = bytes(value)
             else:
-                value = [int(value)] * vl
-        elif params.get("fmt", P.FMT_INT32) == "raw":
-            value = make_value(params, rank=rt.rank)
+                value = make_value(params, rank=rt.rank)
+        else:
+            vl = int(params.get("vector_len") or params.get("data_size") or 0)
+            if vl > 0:
+                if isinstance(value, (list, tuple)):    # pre-built local data
+                    value = [int(v) for v in value]
+                else:
+                    value = [int(value)] * vl
+            else:
+                value = make_value(params, rank=rt.rank)
     else:
         value = make_value(params, rank=rt.rank)
 

@@ -133,11 +133,13 @@ Round 1 / Collective Time 的起点不会因为 release 的顺序而偏晚。
 - 跨时钟**不做差值**：不计算 `TeacherArrival − StudentLocalWork`。
 - 无 Send/无 op 的轮次对应行不显示（不伪造）；真实性能只由 Performance Benchmark 测量。
 
-**性能实验**：Performance Mode 不打印/不上传每轮教学事件。`Collective Time`
-从 Start Barrier"全班到齐"（rank 0 gather 完成）那一刻开始，到**所有 rank 上报
-完成（C_DONE 收齐）**为止；C_RUN 下发、学生输入、数据构造、Start Barrier 等待
-都不计入。另有 `Session wall time`（含输入/控制/UI），只说明课堂节奏、不是算法
-性能。不预设 Tree/Ring 谁赢（Python/TCP/拓扑/机器相关，结果来自真实测量）。
+**性能实验**：Performance Mode 不打印/不上传每轮教学事件。Benchmark 会话：setup 时每
+个 rank 只输入一次整数，之后 54 个 timed case 自动连续执行并复用该值——每个 rank 的值
+经 `make_benchmark_payload(value, bytes)` 编码成自己的 raw payload（`!i` pattern 重复，
+字节级公平、xor combine），rank0 同构；`Collective Time` 从 Start Barrier 到齐到全体
+完成；同一（算法×尺寸）跑 3 次取 median。另有 `Session wall time`（含输入/控制/UI），
+只说明课堂节奏、不是算法性能。数据不预设谁快（Python/TCP/拓扑/机器相关，结果来自
+真实测量）。
 
 ## 2. 目录
 

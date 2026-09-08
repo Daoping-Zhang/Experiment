@@ -35,6 +35,7 @@ from minimpi import mpi as M               # noqa: E402
 from minimpi import protocol as P          # noqa: E402
 from minimpi import teaching as T          # noqa: E402
 from minimpi.classroom_worker import ClassroomWorker  # noqa: E402
+from minimpi.collectives_dispatch import make_benchmark_payload  # noqa: E402
 
 
 def main():
@@ -65,6 +66,11 @@ def run_classroom(comm):
 
             # Performance Benchmark session setup: ONE input, all later cases
             # reuse that value — no per-case prompts, no zero Data Size.
+            if run.kind == "benchmark_done":
+                print("\nBenchmark Complete.\n\nWaiting for Rank 0...")
+                classroom.reset_benchmark()
+                continue
+
             if run.kind == "benchmark_setup":
                 print("\n========================================\n"
                       "Performance Benchmark Setup\n"
@@ -85,7 +91,14 @@ def run_classroom(comm):
             else:
                 value = read_one_integer(comm.Get_rank())
 
-            data = None if run.payload else [value] * run.data_size
+            if run.kind == "benchmark_case":
+                # the value entered once at setup now REALLY builds this
+                # rank's raw payload (byte-level benchmarking, xor combine)
+                data = make_benchmark_payload(value, run.payload)
+            elif run.payload:
+                data = None
+            else:
+                data = [value] * run.data_size
 
             if run.kind != "benchmark_case":
                 if run.data_size > 0:

@@ -104,6 +104,12 @@ class ClassroomWorker:
     def mark_benchmark_announced(self):
         self._benchmark_announced = True
 
+    def reset_benchmark(self):
+        """Benchmark session finished: clear the cached value so the next
+        Benchmark selection asks for a fresh input."""
+        self._benchmark_value = None
+        self._benchmark_announced = False
+
     def close(self):
         self._rt = None
         self._benchmark_value = None

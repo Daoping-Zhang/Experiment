@@ -126,6 +126,56 @@ def test_w_sync_window():
           ok, "window=%s rows=%d" % (window, len(rows)))
 
 
+def test_payload_value_and_dispatch_used():
+    """X3/X4: the value entered once builds THIS rank's payload, and an
+    explicit raw payload is respected by the dispatch (never overwritten by
+    the fixed make_value seed)."""
+    import struct
+    from minimpi.collectives_dispatch import make_benchmark_payload
+    p2 = make_benchmark_payload(2, 16)
+    p3 = make_benchmark_payload(3, 16)
+    ok = (p2 == struct.pack("!i", 2) * 4 and p3 == struct.pack("!i", 3) * 4
+          and p2 != p3 and len(make_benchmark_payload(2, 16 * 1024)) == 16 * 1024)
+    check("X3. benchmark payload derived from the typed value", ok)
+
+    from minimpi import mpi as M
+    from minimpi.communicator import Communicator
+    from minimpi.transport import PeerTransport
+    from minimpi import collectives_dispatch
+    import threading
+
+    class _RT:
+        def __init__(self, comm):
+            self.comm = comm
+            self.mode = "performance"
+        def sync_round(self, rnd):
+            return True
+
+    a = PeerTransport("A", bind_host="127.0.0.1")
+    b = PeerTransport("B", bind_host="127.0.0.1")
+    a.set_peers(0, {1: (b.host, b.port)})
+    b.set_peers(1, {0: (a.host, a.port)})
+    ra, rb = _RT(Communicator(a, 0, 2)), _RT(Communicator(b, 1, 2))
+    params = {"algorithm": "naive_allreduce", "mode": "performance",
+              "op": "xor", "fmt": "raw", "payload": 16}
+    results = {}
+
+    def worker():
+        results[1] = collectives_dispatch.run(rb, dict(params), value=p3,
+                                              barrier=False)
+
+    th = threading.Thread(target=worker)
+    th.start()
+    results[0] = collectives_dispatch.run(ra, dict(params), value=p2,
+                                          barrier=False)
+    th.join(timeout=10)
+    a.close(); b.close()
+    expect = bytes(x ^ y for x, y in zip(p2, p3))
+    ok4 = results.get(0) == expect and results.get(1) == expect
+    check("X4. explicit raw payload respected (xor allreduce == manual xor)",
+          ok4)
+
+
 def test_x_y_z_benchmark_session():
     # one full CLI benchmark: teacher --benchmark (workers headless)
     r = Runner(4, timeout=600)
@@ -142,9 +192,13 @@ def test_x_y_z_benchmark_session():
     w_out = [w.communicate(timeout=5)[0] for w in ws]
     combined = t_out + "".join(w_out)
 
-    # X: every worker entered exactly one benchmark value (headless setup)
-    x_ok = all(o.count("Performance Benchmark Setup") == 1 for o in w_out) \
-        and "Input one integer:" not in combined
+    # X: every worker entered exactly one benchmark value; every case was a
+    # real benchmark_case (no per-case 'Algorithm:' spam); session ended with
+    # Benchmark Complete.
+    x_ok = (all(o.count("Performance Benchmark Setup") == 1 for o in w_out)
+            and "Input one integer:" not in combined
+            and all(o.count("Algorithm:") == 0 for o in w_out)
+            and all(o.count("Benchmark Complete.") == 1 for o in w_out))
     # Y: no zero Data Size anywhere in the whole session
     y_ok = "Data Size: 0 elements" not in combined
     # Z: 3 algorithms x 6 sizes x 3 runs = 54 raw runs
@@ -204,6 +258,7 @@ def main():
     test_u_rd_correctness()
     test_v_timeline_semantics()
     test_w_sync_window()
+    test_payload_value_and_dispatch_used()
     test_x_y_z_benchmark_session()
     print("\nFinal-behavior tests: %d passed, %d failed"
           % (len(PASS), len(FAIL)))
