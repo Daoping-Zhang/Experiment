@@ -1,3 +1,5 @@
+> English version: [README.en.md](./README.en.md)
+
 # Assignment 1 — MPI Reduce & AllReduce
 
 **看懂 → 运行 → 实现 → 自测 → 自动评分** 的第一个"实现"环节。

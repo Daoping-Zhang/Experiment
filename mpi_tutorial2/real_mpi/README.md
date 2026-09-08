@@ -1,3 +1,5 @@
+> English version: [README.en.md](./README.en.md)
+
 # Real MPI Server Demo — "Connect to Reality"
 
 真实 MPI 不是另一套教程，它只回答两个问题：

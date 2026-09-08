@@ -1,3 +1,5 @@
+> English version: [README.en.md](./README.en.md)
+
 # MPI Tutorial 2 — Classroom Collective Communication Runtime
 
 MiniMPI：一个**纯 Python 标准库**的教学 runtime。目标不是复刻生产 MPI，而是让全班学生真实参与 collective communication：每个学生 = 一个独立 worker/rank，worker 之间用**真实 peer-to-peer TCP** 交换数据，collective 全部建立在 `send/recv` 原语之上。
@@ -144,7 +146,7 @@ Round 1 / Collective Time 的起点不会因为 release 的顺序而偏晚。
 ## 2. 目录
 
 ```
-mpi_tutorial2/
+classroom_minimpi/
 ├── teacher.py            # Coordinator + Rank 0（控制面 + 菜单）
 ├── worker.py             # 学生端：join + 专用读线程 + 执行 collective
 ├── minimpi/

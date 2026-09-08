@@ -1,3 +1,5 @@
+> English version: [README.en.md](./README.en.md)
+
 # MPI Tutorial 2 — 三个独立部分
 
 本文件夹把 Tutorial 2 拆成三个相互独立的部分，避免混杂：

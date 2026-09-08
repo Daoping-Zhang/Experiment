@@ -1,5 +1,7 @@
 # Test files
 
+> 中文版: [README.zh-CN.md](./README.zh-CN.md)
+
 `scripts/verify.py` is the automated acceptance suite (runs real teacher +
 worker processes, asserts correct reduce/allreduce results in both modes,
 4 MB payload, no deadlock — every scenario has a timeout).
