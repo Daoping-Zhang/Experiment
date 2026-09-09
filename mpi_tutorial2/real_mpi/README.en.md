@@ -33,6 +33,26 @@ barrier_example.c     MPI_Barrier   a synchronization point (not data reduction)
 This tutorial needs only these 6 core APIs; Alltoall/Scan/Reduce_scatter/
 Scatterv/Gatherv get no code examples yet.
 
+## Passing vectors? — no new type needed, use count
+
+A contiguous int array = the same datatype + **count of elements**: change
+`count=1` to `N` and point the buffer at the array (below: scalar vs.
+N-element array, same shape otherwise):
+
+```c
+int local,  result;                 /* scalar           */
+MPI_Allreduce(&local, &result, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+
+int local[N], result[N];            /* contiguous vector */
+MPI_Allreduce(local, result, N, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+```
+
+MPI has no special built-in "int vector" type. Derived datatypes
+(`MPI_Type_vector` / `MPI_Type_indexed` / `MPI_Type_create_struct` ...,
+with `MPI_Type_commit/free`) are only needed for NON-contiguous layouts
+(strided access, sub-blocks, heterogeneous structs). GEMM rows / row
+blocks are contiguous ints — `count` is enough.
+
 ## Run
 
 ```bash
