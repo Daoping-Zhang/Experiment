@@ -184,7 +184,10 @@ python3 scripts/check_env.py          # 环境自检（零第三方依赖）
 
 # 课堂：一台机器上开 teacher（交互式）
 python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
-# 学生/多终端：每个 worker（MPI 身份只有 Rank，没有名字/初始值参数；
+# 学生一键启动（推荐）：Mac 双击 scripts/start_worker_mac.command；
+#   Windows 双击 scripts/start_worker_windows.bat —— 输入老师 IP:Port 即连接。
+# 手动方式（等价）：
+# # 学生/多终端：每个 worker（MPI 身份只有 Rank，没有名字/初始值参数；
 # 每次 RUN 时各自在终端输入一个整数）
 python3 worker.py --server <teacher-ip>:9000
 

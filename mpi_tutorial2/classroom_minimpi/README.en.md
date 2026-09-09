@@ -247,7 +247,11 @@ python3 scripts/check_env.py          # environment self-check (zero deps)
 
 # Classroom: open a teacher on one machine (interactive)
 python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
-# Students / multiple terminals: one worker each (MPI identity is only the
+# One-click student launcher (recommended): double-click
+#   scripts/start_worker_mac.command  (macOS)
+#   scripts/start_worker_windows.bat  (Windows)
+# and type the teacher's IP:Port. Manual equivalent:
+# # # Students / multiple terminals: one worker each (MPI identity is only the
 # rank; no name/initial-value argument — every RUN asks for one integer)
 python3 worker.py --server <teacher-ip>:9000
 
