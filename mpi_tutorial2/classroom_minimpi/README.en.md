@@ -250,9 +250,8 @@ python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
 # One-click student launcher (recommended): double-click
 #   scripts/start_worker_mac.command  (macOS)
 #   scripts/start_worker_windows.bat  (Windows)
-# and type the teacher's IP:Port. Manual equivalent:
-# # # Students / multiple terminals: one worker each (MPI identity is only the
-# rank; no name/initial-value argument — every RUN asks for one integer)
+# and type the teacher's IP:Port. Manual equivalent (each worker has only a
+# rank; type one integer per RUN):
 python3 worker.py --server <teacher-ip>:9000
 
 # Teacher menu: pick Algorithm, then set
