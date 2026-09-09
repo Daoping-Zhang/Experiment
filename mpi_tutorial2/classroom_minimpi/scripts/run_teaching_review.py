@@ -80,8 +80,7 @@ Base commit:
   setup; every case then reuses it (no per-case prompts, no ENTER); sizes
   are 16 B / 1 KB / 16 KB / 256 KB / 4 MB / 16 MB (all divisible by the
   world size, shown as real Data Sizes, never a zero-element placeholder); each
-  algorithm x size runs 3 times and the summary is the MEDIAN (54 timed
-  runs); a raw per-run log is printed for auditing.
+  algorithm x size runs 3 times and the summary is the MEDIAN; a raw per-run log is printed for auditing.
 * Data-plane connections are warmed once (teacher + workers) after the world
   is ready, before any RUN — persistent sockets reused by the collectives,
   with no algorithm event / no teaching timing / no benchmark timing.
@@ -125,7 +124,7 @@ CLI: teacher --benchmark (workers headless) runs the same session.
 suites run by this generator: test_smoke, test_round_behavior (A-F),
 test_teaching_semantics (G-K), test_timing_worker (L-S),
 test_final_behavior (T-Z: RD topology/correctness, LOCAL TIMELINE semantics,
-synchronization window, benchmark one-input/no-zero-data-size/54-runs/median),
+synchronization window, benchmark one-input/no-zero-data-size/median-summary),
 verify.py.
 
 ## Remaining Issues
@@ -302,7 +301,7 @@ def run_benchmark(out_dir, timeout=900):
 
 
 def _write_benchmark_artifacts(t_out, w_out, out_dir):
-    """benchmark_raw.csv (54 runs), benchmark_summary.txt (median table) and
+    """benchmark_raw.csv (all raw runs), benchmark_summary.txt (median table) and
     BENCHMARK_AUDIT.md answering the review questions."""
     raw_rows = []
     for ln in t_out.splitlines():
@@ -371,7 +370,7 @@ def _write_benchmark_audit(out_dir, raw_rows, med, inputs, t_out, w_out):
         "Naive AllReduce / Recursive Doubling AllReduce / Ring AllReduce",
         "",
         "Sizes (local data per rank):",
-        "16 B / 1 KB / 16 KB / 256 KB / 4 MB / 16 MB",
+        "16 B / 1 KB / 16 KB / 256 KB / 4 MB (16 MB optional via env)",
         "",
         "Runs per case:",
         str(n_runs),

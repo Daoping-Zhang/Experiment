@@ -9,8 +9,9 @@ V. Timeline semantics : LOCAL TIMELINE events are cumulative and
 W. Synchronization    : window == last-first, first arrived 0, last waits 0
 X. Benchmark input once: each worker enters exactly ONE value per session
 Y. No zero Data Size  : no "Data Size: 0 elements" anywhere in the session
-Z. Benchmark plan     : 3 alg x 6 sizes x 3 runs = 54 raw runs; summary
-                        values are medians of the raw runs
+Z. Benchmark plan     : 3 alg x N sizes x 3 runs raw runs (default sizes
+                        end at 4 MB); summary values are medians, and the
+                        summary table is shown on every worker too
 
 Run:  python3 tests/test_final_behavior.py
 """
@@ -26,6 +27,8 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(HERE))
 
 from _proc import Runner  # noqa: E402
+
+import teacher as T  # noqa: E402  (BENCH_ALGORITHMS / BENCH_SIZES / BENCH_RUNS)
 
 PASS = []
 FAIL = []
@@ -198,13 +201,15 @@ def test_x_y_z_benchmark_session():
     x_ok = (all(o.count("Performance Benchmark Setup") == 1 for o in w_out)
             and "Input one integer:" not in combined
             and all(o.count("Algorithm:") == 0 for o in w_out)
-            and all(o.count("Benchmark Complete.") == 1 for o in w_out))
+            and all(o.count("Benchmark Complete.") == 1 for o in w_out)
+            and all("Performance Benchmark Results" in o for o in w_out))
     # Y: no zero Data Size anywhere in the whole session
     y_ok = "Data Size: 0 elements" not in combined
-    # Z: 3 algorithms x 6 sizes x 3 runs = 54 raw runs
+    # Z: 3 algorithms x N default sizes x 3 runs
     raws = re.findall(r"^raw (\S+) (\d+) run\d+ ([0-9.]+) ms", t_out,
                       re.M)
-    z_count = len(raws) == 3 * 6 * 3
+    exp_raw = len(T.BENCH_ALGORITHMS) * len(T.BENCH_SIZES) * T.BENCH_RUNS
+    z_count = len(raws) == exp_raw
     # summary cells equal median of that case's raw runs
     z_med = True
     for alg, sz, ms in raws:
@@ -247,10 +252,10 @@ def test_x_y_z_benchmark_session():
                     if abs(ms - expect[(col, 16)]) > 0.05:
                         z_med = False
     ok = (not timed) and x_ok and y_ok and z_count and z_med
-    check("X/Y/Z. benchmark session: 1 input/rank, no Data Size 0, "
-          "54 raw runs, median summary",
+    check("X/Y/Z. benchmark session: 1 input/rank, no Data Size 0, %d raw "
+          "runs, median summary, shown on every rank" % exp_raw,
           ok,
-          "raws=%d x=%s y=%s" % (len(raws), x_ok, y_ok))
+          "raws=%d exp=%d x=%s y=%s" % (len(raws), exp_raw, x_ok, y_ok))
 
 
 def main():

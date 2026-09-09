@@ -194,7 +194,7 @@ never skewed by the order of the releases.
 
 **Performance experiment**: Performance mode prints/uploads no per-round
 teaching events. Benchmark session: at setup every rank types ONE integer;
-then 54 timed cases run automatically in sequence, reusing that value —
+then all timed cases run automatically in sequence, reusing that value —
 each rank's value is encoded by `make_benchmark_payload(value, bytes)`
 into its own raw payload (repeated `!i` pattern, byte-fair, xor combine);
 rank 0 builds its own the same way. `Collective Time` runs from Start
@@ -202,7 +202,11 @@ Barrier all-ready to every rank's completion; the same (algorithm × size)
 is run 3 times and the median is reported. A `Session wall time`
 (incl. input / control / UI) is also printed but only describes classroom
 pacing, not algorithm performance. No outcome is pre-decided (Python/TCP/
-topology/machine dependent — numbers come from real measurements).
+topology/machine dependent — numbers come from real measurements). The results table is
+  broadcast to EVERY student rank (everyone sees the same median table).
+  Default sizes stop at 4 MB (16 MB was removed so a real-LAN classroom
+  demo stays short); override with MINIMPI_BENCH_SIZES="16,1024,16384" if
+  needed.
 
 ## 2. Directory
 

@@ -67,6 +67,9 @@ def run_classroom(comm):
             # Performance Benchmark session setup: ONE input, all later cases
             # reuse that value — no per-case prompts, no zero Data Size.
             if run.kind == "benchmark_done":
+                sm = run.params.get("summary")
+                if sm:
+                    print("\n" + sm)     # teacher's results, shown on this rank too
                 print("\nBenchmark Complete.\n\nWaiting for Rank 0...")
                 classroom.reset_benchmark()
                 continue

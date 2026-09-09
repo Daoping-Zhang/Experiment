@@ -136,12 +136,14 @@ Round 1 / Collective Time 的起点不会因为 release 的顺序而偏晚。
 - 无 Send/无 op 的轮次对应行不显示（不伪造）；真实性能只由 Performance Benchmark 测量。
 
 **性能实验**：Performance Mode 不打印/不上传每轮教学事件。Benchmark 会话：setup 时每
-个 rank 只输入一次整数，之后 54 个 timed case 自动连续执行并复用该值——每个 rank 的值
+个 rank 只输入一次整数，之后所有 timed case 自动连续执行并复用该值——每个 rank 的值
 经 `make_benchmark_payload(value, bytes)` 编码成自己的 raw payload（`!i` pattern 重复，
 字节级公平、xor combine），rank0 同构；`Collective Time` 从 Start Barrier 到齐到全体
 完成；同一（算法×尺寸）跑 3 次取 median。另有 `Session wall time`（含输入/控制/UI），
 只说明课堂节奏、不是算法性能。数据不预设谁快（Python/TCP/拓扑/机器相关，结果来自
-真实测量）。
+真实测量）。结果表会**广播到每个 student rank 终端**（每人看到同一张
+median 表）。默认尺寸到 4 MB（16 MB 已移除，避免真实局域网课堂演示过久）；可用
+`MINIMPI_BENCH_SIZES=16,1024,16384` 这类环境变量临时改尺寸。
 
 ## 2. 目录
 

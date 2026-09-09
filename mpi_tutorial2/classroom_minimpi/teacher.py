@@ -686,9 +686,15 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True,
 BENCH_ALGORITHMS = ["naive_allreduce", "recursive_doubling_allreduce",
                     "ring_allreduce"]
 # bytes per rank per case — all divisible by World Size (int32 elements):
-#   16 B=4, 1 KB=256, 16 KB=4096, 256 KB=65536, 4 MB=1048576, 16 MB=4194304
-BENCH_SIZES = [16, 1024, 16 * 1024, 256 * 1024,
-               4 * 1024 * 1024, 16 * 1024 * 1024]
+#   default 16 B .. 4 MB (16 MB removed so a real-LAN classroom demo stays
+#   short). Override with MINIMPI_BENCH_SIZES="16,1024,16384" etc.
+def _bench_sizes():
+    raw = os.environ.get("MINIMPI_BENCH_SIZES", "")
+    if raw.strip():
+        return [int(x.strip()) for x in raw.split(",") if x.strip()]
+    return [16, 1024, 16 * 1024, 256 * 1024, 4 * 1024 * 1024]
+
+BENCH_SIZES = _bench_sizes()
 BENCH_RUNS = 3
 
 
@@ -709,7 +715,7 @@ def _elem_rows():
 
 def run_benchmark(coord):
     """Performance Benchmark session: each rank enters ONE value, then 3
-    algorithms x 6 sizes x 3 runs run automatically; results are medians."""
+    algorithms x len(BENCH_SIZES) sizes x 3 runs run automatically;\n    results are medians and the summary is shown on EVERY rank."""
     print("\n========================================\n"
           "Performance Benchmark\n"
           "========================================")
@@ -758,16 +764,16 @@ def run_benchmark(coord):
                       (a, b, k + 1, ms, done, total))
             rows[a][b] = _median(times)
 
-    print("\n" + "=" * 78)
-    print("Performance Benchmark Results")
-    print("%d runs per case — median" % BENCH_RUNS)
-    print("World Size: %d" % coord.size)
-    print("=" * 78)
+    summary = ["\n" + "=" * 78,
+               "Performance Benchmark Results",
+               "%d runs per case — median" % BENCH_RUNS,
+               "World Size: %d" % coord.size,
+               "=" * 78]
     cols = ["Local Data / Rank", "Naive", "Recursive Doubling", "Ring"]
     widths = [26, 10, 18, 12]
     header = "".join(c.ljust(w) for c, w in zip(cols, widths))
-    print(header)
-    print("-" * len(header))
+    summary.append(header)
+    summary.append("-" * len(header))
     for b in BENCH_SIZES:
         line = ("%s  = %d elem" % (fmt_bytes(b), b // P.ELEMENT_BYTES)).ljust(
             widths[0])
@@ -775,11 +781,14 @@ def run_benchmark(coord):
         line += ("%7.2f ms" % rows["recursive_doubling_allreduce"][b]
                  ).ljust(widths[2])
         line += ("%7.2f ms" % rows["ring_allreduce"][b]).ljust(widths[3])
-        print(line)
-    print("\nLower is better.")
-    coord.send_to_workers({"t": P.C_RUN,
-                           "params": {"kind": "benchmark_done",
-                                      "mode": "performance"}})
+        summary.append(line)
+    summary.append("\nLower is better.")
+    print("\n".join(summary))
+    # show the same summary table on EVERY student rank
+    coord.send_to_workers(
+        {"t": P.C_RUN, "params": {"kind": "benchmark_done",
+                                  "mode": "performance",
+                                  "summary": "\n".join(summary)}})
     print("\nBenchmark Complete.\n\nReturning to Teacher menu...")
 
 
