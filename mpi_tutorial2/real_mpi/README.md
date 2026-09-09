@@ -50,6 +50,28 @@ MPI 没有"int vector 专用内置类型"。只有当布局**不连续**（跨 s
 （`MPI_Type_vector` / `MPI_Type_indexed` / `MPI_Type_create_struct` …，
 需 `MPI_Type_commit/free`）。GEMM 的行/行分块是连续 int，用 count 即可。
 
+## 矩阵 / 一行 / 行分块怎么做
+
+row-major 下**一行是连续的**（第 r 行起点 = `&A[r*K]`，连续 K 个 int）；
+推荐把矩阵**展平成一块连续 buffer**（`int A[M*K]`），分块行就是连续的一段：
+
+```c
+int rows = M / P;                     /* M % P == 0 时每人 rows 行 */
+int *A      = malloc(sizeof(int) * M * K);     /* rank 0 读取后展平 */
+int *local_A = malloc(sizeof(int) * rows * K);
+
+MPI_Scatter(A,        rows * K, MPI_INT,   /* sendcount = 每人元素个数 */
+            local_A,  rows * K, MPI_INT,
+            0, MPI_COMM_WORLD);
+```
+
+结果同理：`MPI_Gather(local_C, rows*N, MPI_INT, C, rows*N, MPI_INT, 0, ...)`，
+rank 0 拿到展平的整块 C（需要时可再按行做视图）。
+
+跨 stride / 非连续才需要 derived types：取一列 → 复制或用
+`MPI_Type_vector`；2D 子块 → `MPI_Type_create_subarray`；每 rank 行数不同
+（M %% P != 0）→ `MPI_Scatterv / MPI_Gatherv`。
+
 ## 运行
 
 ```bash

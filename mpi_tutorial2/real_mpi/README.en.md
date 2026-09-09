@@ -53,6 +53,31 @@ with `MPI_Type_commit/free`) are only needed for NON-contiguous layouts
 (strided access, sub-blocks, heterogeneous structs). GEMM rows / row
 blocks are contiguous ints — `count` is enough.
 
+## Matrix / a row / row blocks
+
+In row-major memory a **row is contiguous** (row r starts at `&A[r*K]`,
+K contiguous ints). The recommended way is to keep the matrix as ONE flat
+contiguous buffer (`int A[M*K]`), so a block of rows is one contiguous
+piece:
+
+```c
+int rows = M / P;                     /* M % P == 0 -> rows rows each */
+int *A      = malloc(sizeof(int) * M * K);     /* rank 0 reads & flattens */
+int *local_A = malloc(sizeof(int) * rows * K);
+
+MPI_Scatter(A,        rows * K, MPI_INT,   /* sendcount = elements per rank */
+            local_A,  rows * K, MPI_INT,
+            0, MPI_COMM_WORLD);
+```
+
+Same for results: `MPI_Gather(local_C, rows*N, MPI_INT, C, rows*N, MPI_INT, 0, ...)`,
+rank 0 gets the flat C (add a row view later if you like).
+
+Derived types are only for NON-contiguous layouts: a column → copy to a
+temporary buffer or `MPI_Type_vector`; a 2D sub-block →
+`MPI_Type_create_subarray`; uneven rows per rank (M %% P != 0) →
+`MPI_Scatterv / MPI_Gatherv`.
+
 ## Run
 
 ```bash
