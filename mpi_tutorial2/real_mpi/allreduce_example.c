@@ -18,7 +18,23 @@ int main(int argc, char **argv) {
     int local = rank + 1;
     int result = -1;
 
-    MPI_Allreduce(&local, &result, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    /* MPI_Allreduce(sendbuf, recvbuf, count, datatype, op, comm)
+     *   sendbuf : &local — this rank's value (all ranks send)
+     *   recvbuf : &result — EVERY rank receives the reduced result
+     *   count   : 1
+     *   datatype: MPI_INT
+     *   op      : MPI_SUM
+     *   comm    : MPI_COMM_WORLD
+     * (No root argument: the result is returned to all ranks.)
+     */
+    MPI_Allreduce(
+        &local,           /* sendbuf */
+        &result,          /* recvbuf — every rank gets the result */
+        1,                /* count */
+        MPI_INT,          /* datatype */
+        MPI_SUM,          /* op */
+        MPI_COMM_WORLD    /* communicator */
+    );
 
     printf("Rank %d AllReduce result = %d\n", rank, result);
     fflush(stdout);

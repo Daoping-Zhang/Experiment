@@ -18,6 +18,12 @@ int main(int argc, char **argv) {
     printf("Rank %d before barrier\n", rank);
     fflush(stdout);
 
+    /* MPI_Barrier(comm)
+     *   comm : MPI_COMM_WORLD
+     * Blocking synchronization: no rank proceeds past this call until
+     * every rank in the communicator has reached it. No data is moved —
+     * this is NOT a reduction.
+     */
     MPI_Barrier(MPI_COMM_WORLD);
 
     printf("Rank %d after barrier\n", rank);

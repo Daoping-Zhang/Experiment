@@ -18,8 +18,27 @@ int main(int argc, char **argv) {
     int local = (rank + 1) * 10;         /* 10, 20, 30, 40 */
     int recvbuf[4] = {0, 0, 0, 0};       /* only rank 0 uses this */
 
-    MPI_Gather(&local, 1, MPI_INT, recvbuf, 1, MPI_INT, 0,
-               MPI_COMM_WORLD);
+    /* MPI_Gather(sendbuf, sendcount, sendtype, recvbuf, recvcount,
+     *             recvtype, root, comm)
+     *   sendbuf   : &local — this rank's one value
+     *   sendcount : 1
+     *   sendtype  : MPI_INT
+     *   recvbuf   : recvbuf — root collects [10,20,30,40] here
+     *   recvcount : 1 — elements per rank (not total)
+     *   recvtype  : MPI_INT
+     *   root      : 0
+     *   comm      : MPI_COMM_WORLD
+     */
+    MPI_Gather(
+        &local,           /* sendbuf: this rank's value */
+        1,                /* sendcount */
+        MPI_INT,          /* sendtype */
+        recvbuf,          /* recvbuf (root only) */
+        1,                /* recvcount: one element per rank */
+        MPI_INT,          /* recvtype */
+        0,                /* root */
+        MPI_COMM_WORLD    /* communicator */
+    );
 
     if (rank == 0) {
         printf("Gathered result:");

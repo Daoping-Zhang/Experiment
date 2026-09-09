@@ -17,7 +17,24 @@ int main(int argc, char **argv) {
     int local = rank + 1;
     int result = -1;
 
-    MPI_Reduce(&local, &result, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    /* MPI_Reduce(sendbuf, recvbuf, count, datatype, op, root, comm)
+     *   sendbuf : &local  — this rank's value (all ranks send)
+     *   recvbuf : &result — only meaningful on root
+     *   count   : 1
+     *   datatype: MPI_INT
+     *   op      : MPI_SUM
+     *   root    : 0       — only this rank receives the result
+     *   comm    : MPI_COMM_WORLD
+     */
+    MPI_Reduce(
+        &local,           /* sendbuf */
+        &result,          /* recvbuf (root only) */
+        1,                /* count */
+        MPI_INT,          /* datatype */
+        MPI_SUM,          /* op */
+        0,                /* root */
+        MPI_COMM_WORLD    /* communicator */
+    );
 
     if (rank == 0)
         printf("Rank 0 Reduce result = %d\n", result);

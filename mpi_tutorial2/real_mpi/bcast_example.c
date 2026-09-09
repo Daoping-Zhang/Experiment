@@ -20,7 +20,20 @@ int main(int argc, char **argv) {
     fflush(stdout);
     MPI_Barrier(MPI_COMM_WORLD);
 
-    MPI_Bcast(&value, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    /* MPI_Bcast(buffer, count, datatype, root, comm)
+     *   buffer   : &value — one value to send (root) / receive (others)
+     *   count    : 1      — number of elements
+     *   datatype : MPI_INT
+     *   root     : 0      — the rank whose value is broadcast
+     *   comm     : MPI_COMM_WORLD
+     */
+    MPI_Bcast(
+        &value,          /* buffer (send on root, recv elsewhere) */
+        1,               /* count */
+        MPI_INT,         /* datatype */
+        0,               /* root */
+        MPI_COMM_WORLD   /* communicator */
+    );
 
     MPI_Barrier(MPI_COMM_WORLD);
     printf("After Bcast   Rank %d value = %d\n", rank, value);
