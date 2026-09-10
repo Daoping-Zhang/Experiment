@@ -143,9 +143,18 @@ class Coordinator:
                              daemon=True).start()
 
     def _handle_worker(self, conn):
+        rank = None
         try:
+            who = "?"
+            try:
+                peer = conn.getpeername()
+                who = "%s:%s" % (peer[0], peer[1])
+            except OSError:
+                pass
             msg = P.ctrl_recv_line(conn)
             if msg is None or msg.get("t") != P.C_JOIN:
+                print("[JOIN] %s -> REJECTED: bad handshake (no join message)"
+                      % who)
                 return
             # ---- version guard: everyone must run the same MiniMPI --------
             wv = msg.get("version")
@@ -157,21 +166,31 @@ class Coordinator:
                        % (wv or "unknown/old copy", wp,
                           P.MINIMPI_VERSION, P.PROTOCOL_VERSION))
                 P.ctrl_send(conn, {"t": P.C_ERROR, "why": why})
-                print("[VERSION] rejected a worker: %s" % why)
+                print("[VERSION] rejected a worker: %s\n"
+                      "[JOIN] %s -> REJECTED: %s" % (why, who, why))
                 return
             with self.lock:
                 if self.next_rank >= self.size:
-                    P.ctrl_send(conn, {"t": P.C_ERROR, "why": "world already full"})
+                    P.ctrl_send(conn, {"t": P.C_ERROR,
+                                       "why": "world already full"})
+                    print("[JOIN] %s -> REJECTED: world already full "
+                          "(size=%d)" % (who, self.size))
                     return
                 rank = self.next_rank
                 self.next_rank += 1
                 self.workers[rank] = conn
                 self.peers[rank] = {"host": msg["host"], "port": int(msg["port"])}
+                ready = len(self.workers) + 1
+                total = self.size
             welcome = {"t": P.C_WELCOME, "rank": rank, "size": self.size,
                        "peers": self.peers,
                        "version": P.MINIMPI_VERSION,
                        "protocol": P.PROTOCOL_VERSION}
             P.ctrl_send(conn, welcome)
+            print("[JOIN] %s -> Rank %d  (data plane %s:%s)  "
+                  "[%d/%d ranks ready]"
+                  % (who, rank, msg.get("host"), msg.get("port"),
+                     ready, total))
             while not self.closed:
                 m = P.ctrl_recv_line(conn)
                 self._dispatch(rank, m)
@@ -182,6 +201,10 @@ class Coordinator:
                 conn.close()
             except OSError:
                 pass
+            if rank is not None:
+                with self.lock:
+                    self.workers.pop(rank, None)
+                print("[LEAVE] Rank %d disconnected" % rank)
 
     def _dispatch(self, rank, m):
         t = m.get("t")
@@ -845,8 +868,13 @@ MENU = [
 
 
 def wait_ready(coord, size):
-    print("\nWaiting for ranks (%d/%d)..." % (len(coord.workers) + 1, size))
+    last = len(coord.workers) + 1
+    print("\nWaiting for ranks (%d/%d)..." % (last, size))
     while len(coord.workers) + 1 < size:
+        cur = len(coord.workers) + 1
+        if cur != last:                      # live feedback per join
+            print("Waiting for ranks (%d/%d)..." % (cur, size))
+            last = cur
         time.sleep(0.4)
     print("MPI World Ready: %d / %d ranks (%d student workers)\n"
           % (size, size, size - 1))

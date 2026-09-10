@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """test_version_guard.py — worker/teacher must run the SAME MiniMPI version.
 
-A worker whose version differs is refused at join (teacher prints
-'[VERSION] rejected a worker ...') and exits with [VERSION MISMATCH] +
-update instructions. A same-version worker joins normally.
+Every join attempt is now visible on the teacher side:
+  [JOIN] 192.168.1.45:51234 -> Rank 1  (data plane ...)  [2/4 ranks ready]
+  [JOIN] ... -> REJECTED: version mismatch ...
+  [LEAVE] Rank 1 disconnected
+A worker whose version differs is refused (exit code 2, update instructions);
+a same-version worker joins normally.
 
 Run:  python3 tests/test_version_guard.py
 """
@@ -52,8 +55,10 @@ def test_version_guard():
               and "please update" in bad_out.lower())
 
     # 2) same-version worker joins normally (banner shows the version)
+    #    NOTE: a fresh env — the fake version must NOT leak into this worker.
+    env2 = dict(os.environ, PYTHONUNBUFFERED="1")
     good = subprocess.Popen(_worker_cmd(r), stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, env=env)
+                            stderr=subprocess.STDOUT, text=True, env=env2)
     time.sleep(3)
     good.kill()
     good_out, _ = good.communicate(timeout=5)
@@ -61,12 +66,16 @@ def test_version_guard():
 
     r.kill()
     t_out, _ = t.communicate(timeout=5)
-    ok_teacher = "[VERSION] rejected a worker" in (t_out or "")
+    t_out = t_out or ""
+    ok_teacher = ("REJECTED" in t_out and "version mismatch" in t_out
+                  and "[JOIN]" in t_out)
 
     check("worker with old version is refused + told to update",
           ok_bad, "rc=%s" % bad.returncode)
-    check("teacher logs the rejection", ok_teacher)
+    check("teacher logs the rejection (IP:port + reason)", ok_teacher)
     check("same-version worker joins normally", ok_good)
+    check("teacher prints an accepted JOIN with its rank",
+          ("-> Rank 1" in t_out), "see teacher log")
 
 
 def main():

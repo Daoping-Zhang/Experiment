@@ -184,6 +184,9 @@ python3 scripts/check_env.py          # 环境自检（零第三方依赖）
 
 # 课堂：一台机器上开 teacher（交互式）
 python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
+#   每个学生加入都会打印：
+#   [JOIN] 192.168.1.45:51234 -> Rank 1  (data plane ...)  [2/4 ranks ready]
+#   失败会打印 REJECTED 原因（版本不一致 / world 已满）；掉线打印 [LEAVE] Rank x
 # 学生一键启动（推荐）：Mac 双击 scripts/start_worker_mac.command；
 #   Windows 双击 scripts/start_worker_windows.bat —— 输入老师 IP:Port 即连接。
 # 手动方式（等价；每个 worker 的 MPI 身份只有 Rank，每次 RUN 各自输入一个整数）：

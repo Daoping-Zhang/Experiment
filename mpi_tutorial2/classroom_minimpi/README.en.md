@@ -247,6 +247,9 @@ python3 scripts/check_env.py          # environment self-check (zero deps)
 
 # Classroom: open a teacher on one machine (interactive)
 python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
+#   Every join is logged, e.g.
+#   [JOIN] 192.168.1.45:51234 -> Rank 1  (data plane ...)  [2/4 ranks ready]
+#   failures print REJECTED (version mismatch / world full); leaving prints [LEAVE] Rank x
 # One-click student launcher (recommended): double-click
 #   scripts/start_worker_mac.command  (macOS)
 #   scripts/start_worker_windows.bat  (Windows)
