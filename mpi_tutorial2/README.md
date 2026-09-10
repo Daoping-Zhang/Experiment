@@ -35,3 +35,5 @@ Use collectives to build a parallel GEMM
 - Python 仅用于课程教学工具（如之前的 check.py/grader），**不是**学生提交语言。
 
 MiniMPI（classroom_minimpi/）本身已冻结；本层只做组织整理。
+
+> 学生课前准备说明（下载/环境检查/运行/排障）：[STUDENT_SETUP.md](./STUDENT_SETUP.md)

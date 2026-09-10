@@ -39,3 +39,5 @@ Language roles (so students are not confused):
 
 MiniMPI (`classroom_minimpi/`) itself is frozen; this layer is organisation
 only.
+
+> Student pre-class setup guide: [STUDENT_SETUP.en.md](./STUDENT_SETUP.en.md)
