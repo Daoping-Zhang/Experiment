@@ -8,6 +8,7 @@ A rank is either:
 worker execute byte-for-byte the same algorithm code.
 """
 import json
+import os
 import socket
 import threading
 
@@ -15,6 +16,15 @@ from . import protocol as P
 from .transport import PeerTransport
 from .communicator import Communicator
 from .metrics import EventLog
+
+
+class VersionMismatch(RuntimeError):
+    """Worker and teacher are not the same MiniMPI version (refused at join)."""
+
+
+def _worker_version():
+    # test-only hook: pretend to be another version to exercise the guard
+    return os.environ.get("MINIMPI_FAKE_VERSION") or P.MINIMPI_VERSION
 
 
 class SendRecvControl:
@@ -88,10 +98,24 @@ class MiniRuntime:
         ip = _detect_ip(host)
         self.advertise_ip = ip
         self.control.send({"t": P.C_JOIN, "host": ip,
-                           "port": self.transport.port})
+                           "port": self.transport.port,
+                           "version": _worker_version(),
+                           "protocol": P.PROTOCOL_VERSION})
         welcome = self.control.recv()
-        if welcome is None or welcome.get("t") != P.C_WELCOME:
+        if welcome is None:
+            raise RuntimeError("teacher closed the control connection")
+        if welcome.get("t") == P.C_ERROR:
+            raise VersionMismatch(welcome.get("why", "teacher refused join"))
+        if welcome.get("t") != P.C_WELCOME:
             raise RuntimeError("did not receive welcome from teacher")
+        tv = welcome.get("version")
+        tp = welcome.get("protocol")
+        if tv != P.MINIMPI_VERSION or tp != P.PROTOCOL_VERSION:
+            raise VersionMismatch(
+                "version mismatch: worker=%s (protocol %s), teacher=%s "
+                "(protocol %s) — please UPDATE the teacher copy (git pull)"
+                % (_worker_version(), P.PROTOCOL_VERSION,
+                   tv or "unknown/old copy", tp))
         self.rank = int(welcome["rank"])
         self.size = int(welcome["size"])
         peers = {int(k): (v["host"], v["port"]) for k, v in welcome["peers"].items()}

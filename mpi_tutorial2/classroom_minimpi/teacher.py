@@ -147,6 +147,18 @@ class Coordinator:
             msg = P.ctrl_recv_line(conn)
             if msg is None or msg.get("t") != P.C_JOIN:
                 return
+            # ---- version guard: everyone must run the same MiniMPI --------
+            wv = msg.get("version")
+            wp = msg.get("protocol")
+            if wv != P.MINIMPI_VERSION or wp != P.PROTOCOL_VERSION:
+                why = ("version mismatch: worker=%s (protocol %s), "
+                       "teacher=%s (protocol %s) — please UPDATE the student "
+                       "copy (git pull) and restart"
+                       % (wv or "unknown/old copy", wp,
+                          P.MINIMPI_VERSION, P.PROTOCOL_VERSION))
+                P.ctrl_send(conn, {"t": P.C_ERROR, "why": why})
+                print("[VERSION] rejected a worker: %s" % why)
+                return
             with self.lock:
                 if self.next_rank >= self.size:
                     P.ctrl_send(conn, {"t": P.C_ERROR, "why": "world already full"})
@@ -156,7 +168,9 @@ class Coordinator:
                 self.workers[rank] = conn
                 self.peers[rank] = {"host": msg["host"], "port": int(msg["port"])}
             welcome = {"t": P.C_WELCOME, "rank": rank, "size": self.size,
-                       "peers": self.peers}
+                       "peers": self.peers,
+                       "version": P.MINIMPI_VERSION,
+                       "protocol": P.PROTOCOL_VERSION}
             P.ctrl_send(conn, welcome)
             while not self.closed:
                 m = P.ctrl_recv_line(conn)
@@ -866,6 +880,8 @@ def main():
               "========================================")
         print("Coordinator: %s:%d" % (coord.advertise, coord.port))
         print("Rank 0: Teacher (a real collective participant)")
+        print("Version: %s (protocol %d)" % (P.MINIMPI_VERSION,
+                                             P.PROTOCOL_VERSION))
         print("Expected World Size: %d" % args.size)
         print("\nTeacher Role")
         print("-" * 40)

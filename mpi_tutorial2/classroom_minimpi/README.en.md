@@ -282,6 +282,28 @@ N/P × 4 B); the real message size is shown by the communication events via
 equal — it is the reduced/AllReduced result); we never print a whole big
 vector. Barrier sync messages never appear in the communication view.
 
+### Version consistency (the whole class must match)
+
+The teacher prints on startup:
+
+```text
+Version: 2.1.0 (protocol 1)
+```
+
+A worker also prints its own version and reports `version/protocol` when it
+joins. If a student copy differs, the worker is refused immediately and both
+sides say exactly what to do:
+
+```text
+teacher: [VERSION] rejected a worker: version mismatch: worker=0.0.0 ...
+worker : [VERSION MISMATCH] ... Please update this student copy (git pull /
+         re-download) and start the worker again.
+```
+
+**Fix**: `git pull` (or re-download `classroom_minimpi`) on the student
+machine, then double-click `scripts/start_worker_*` again. Nothing to change
+on the teacher side.
+
 ## 4. Classroom demo main line
 
 ```

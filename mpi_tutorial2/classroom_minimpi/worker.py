@@ -36,13 +36,22 @@ from minimpi import protocol as P          # noqa: E402
 from minimpi import teaching as T          # noqa: E402
 from minimpi.classroom_worker import ClassroomWorker  # noqa: E402
 from minimpi.collectives_dispatch import make_benchmark_payload  # noqa: E402
+from minimpi.runtime import VersionMismatch  # noqa: E402
 
 
 def main():
     args = parse_args()
 
     MPI = M                                 # MPI.Init starts ONE session:
-    MPI.Init(server=args.server)            # connects/joins + COMM_WORLD
+    print("MiniMPI Worker version %s (protocol %d)"
+          % (P.MINIMPI_VERSION, P.PROTOCOL_VERSION))
+    try:
+        MPI.Init(server=args.server)        # connects/joins + COMM_WORLD
+    except VersionMismatch as e:
+        print("\n[VERSION MISMATCH] %s" % e)
+        print("Please update this student copy (git pull / re-download) "
+              "and start the worker again.")
+        sys.exit(2)
     try:
         comm = MPI.COMM_WORLD
         rank = comm.Get_rank()

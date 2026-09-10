@@ -214,6 +214,27 @@ python3 scripts/run_teaching_review.py   # 一键生成 Teaching View 审核包
 最终结果只显示**一个数**（向量每个元素相等，它就是归约/AllReduce 的结果），
 不在终端打印整条大向量。barrier 同步消息不计入通信视图。
 
+### 版本一致性（务必全班同版本）
+
+Teacher 启动会打印：
+
+```text
+Version: 2.1.0 (protocol 1)
+```
+
+Worker 启动也会打印自己的版本，并在 join 时把 `version/protocol` 一起上报。若与学生机上的副本
+**版本不一致**，worker 会被当场拒绝，双方都会给出明确提示：
+
+```text
+teacher: [VERSION] rejected a worker: version mismatch: worker=0.0.0 (protocol 1),
+         teacher=2.1.0 (protocol 1) — please UPDATE the student copy ...
+worker : [VERSION MISMATCH] ... Please update this student copy (git pull /
+         re-download) and start the worker again.
+```
+
+**处理方式**：在学生机 `git pull`（或重新下载 `classroom_minimpi`）后，重新双击
+`scripts/start_worker_*` 即可；teacher 侧不需要改任何参数。
+
 ## 4. 课堂演示主线
 
 ```

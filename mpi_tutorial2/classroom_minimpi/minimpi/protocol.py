@@ -19,6 +19,16 @@ import threading
 ANY_SOURCE = -1
 ANY_TAG = -1
 
+# ---------------------------------------------------------------------------
+# Version guard: worker and teacher MUST be the same version.
+#   MINIMPI_VERSION  : bump on any classroom behaviour change
+#   PROTOCOL_VERSION : bump when the control/data-plane message shape changes
+# A worker whose version differs is rejected at join with a clear message
+# telling the student to update the copy (git pull) and restart.
+# ---------------------------------------------------------------------------
+MINIMPI_VERSION = "2.1.0"
+PROTOCOL_VERSION = 1
+
 # tag meanings inside the MiniMPI DATA plane (all via comm.send/comm.recv):
 #   ALGO_TAG_BASE   : upper bound of the algorithm tag region. Every collective
 #                     module owns ONE small dedicated channel tag below it
