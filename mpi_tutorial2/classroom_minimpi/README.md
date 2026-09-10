@@ -171,6 +171,7 @@ classroom_minimpi/
 ├── scripts/
 │   ├── check_env.py      # Python/环境检查
 │   ├── local_demo.py     # 单机跑 teacher+workers
+│   ├── local_benchmark.py# 单机跑完整 Performance Benchmark（输入 --size rank 数；看 loopback baseline）     # 单机跑 teacher+workers
 │   ├── verify.py         # 自动验收（含 timeout，hang 即 FAIL）
 │   ├── run_teaching_review.py  # 一键生成 Teaching View 审核包（tar.gz）
 │   └── _proc.py          # 子进程助手
@@ -207,6 +208,7 @@ python3 teacher.py --size 4 --demo recursive_doubling_allreduce --mode performan
 # 单机一把跑（真实子进程 teacher + 3 workers）
 python3 scripts/local_demo.py --size 4 --demo recursive_doubling_allreduce --mode teaching
 python3 scripts/verify.py            # 自动验收
+python3 scripts/local_benchmark.py --size 4   # 单机跑完整 benchmark（loopback baseline）
 python3 scripts/run_teaching_review.py   # 一键生成 Teaching View 审核包
 ```
 

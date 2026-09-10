@@ -234,6 +234,7 @@ classroom_minimpi/
 ├── scripts/
 │   ├── check_env.py      # Python/environment check
 │   ├── local_demo.py     # run teacher+workers on one machine
+│   ├── local_benchmark.py# full Performance Benchmark on ONE machine (loopback baseline)     # run teacher+workers on one machine
 │   ├── verify.py         # automated acceptance (timeouts; hang = FAIL)
 │   ├── run_teaching_review.py  # generate the Teaching View review tarball
 │   └── _proc.py          # subprocess helpers
@@ -272,6 +273,7 @@ python3 teacher.py --size 4 --demo recursive_doubling_allreduce --mode performan
 # One-machine full run (real subprocesses: teacher + 3 workers)
 python3 scripts/local_demo.py --size 4 --demo recursive_doubling_allreduce --mode teaching
 python3 scripts/verify.py            # automated acceptance
+python3 scripts/local_benchmark.py --size 4   # full benchmark on ONE machine (loopback)
 python3 scripts/run_teaching_review.py   # one-click Teaching View review package
 ```
 
