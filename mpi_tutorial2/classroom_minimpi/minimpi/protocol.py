@@ -10,6 +10,7 @@ Control plane (worker <-> teacher)
 """
 import json
 import socket
+import sys
 import struct
 import threading
 
@@ -77,6 +78,12 @@ C_RELEASE = "release"           # teacher -> worker: teaching-mode round release
 C_DONE = "collective_done"      # worker -> teacher: algorithm finished (+ value)
 C_SUMMARY = "summary"           # teacher -> worker: benchmark summary (display)
 C_ABORT = "abort"                # teacher -> worker: cancel current RUN
+C_HEARTBEAT = "heartbeat"        # worker -> teacher: "I am alive and waiting"
+# A worker that stops sending heartbeats is frozen (asleep laptop, dead VM,
+# stopped process) — the only reliable way to tell it apart from a rank that is
+# simply blocked in a barrier, since both look silent on the data plane.
+HEARTBEAT_S = 2.0
+HEARTBEAT_STALE_S = 6.0
 C_SHUTDOWN = "shutdown"
 C_ERROR = "error"
 
@@ -141,3 +148,41 @@ def ctrl_recv_line(sock):
         if byte == b"\n":
             return json.loads(buf.decode("utf-8"))
         buf.extend(byte)
+
+
+# ---------------------------------------------------------------------------
+# Socket liveness
+# ---------------------------------------------------------------------------
+def enable_keepalive(sock, idle=8, interval=2, probes=3):
+    """Best-effort TCP keepalive on a MiniMPI socket.
+
+    A student closing the laptop lid or pulling the cable sends no FIN: the
+    peer's reads simply block forever and the class would wait for a rank that
+    can no longer answer (until the stall watchdog fires). Keepalive turns
+    that into a normal disconnect, which every robustness path already
+    handles. Option names differ per platform, so every step is best-effort.
+    """
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        return False
+    for name, value in (("TCP_KEEPIDLE", idle),       # Linux
+                        ("TCP_KEEPALIVE", idle),      # macOS: idle seconds
+                        ("TCP_KEEPINTVL", interval),
+                        ("TCP_KEEPCNT", probes)):
+        opt = getattr(socket, name, None)
+        if opt is None:
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, opt, value)
+        except OSError:
+            pass
+    if sys.platform == "darwin" and getattr(socket, "TCP_KEEPALIVE", None) is None:
+        # CPython on macOS does not expose Darwin's TCP_KEEPALIVE (idle
+        # seconds, option 0x10), so set it through the raw number: without it
+        # the first probe would only go out after the OS default (2 hours).
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, 0x10, idle)
+        except OSError:
+            pass
+    return True

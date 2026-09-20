@@ -36,7 +36,35 @@ from minimpi import protocol as P          # noqa: E402
 from minimpi import teaching as T          # noqa: E402
 from minimpi.classroom_worker import ClassroomWorker  # noqa: E402
 from minimpi.collectives_dispatch import make_benchmark_payload  # noqa: E402
-from minimpi.runtime import VersionMismatch  # noqa: E402
+from minimpi.runtime import JoinRefused, VersionMismatch  # noqa: E402
+
+
+def join_world(MPI, server, attempts=60, delay=3.0):
+    """Join the class, retrying while the teacher is busy.
+
+    A student who starts the worker in the middle of a collective is refused
+    ("a collective run is in progress"). Their copy is fine, so instead of
+    exiting we wait and try again — by the time that run finishes they join as
+    a normal latecomer and take part in the next RUN."""
+    for i in range(1, attempts + 1):
+        try:
+            MPI.Init(server=server)
+            if i > 1:
+                print("\n[JOIN] reconnected on attempt %d." % i)
+            return
+        except JoinRefused as e:
+            if i >= attempts:
+                print("\n[JOIN REFUSED] %s" % e)
+                print("Giving up after %d attempts — tell the teacher." % i)
+                raise
+            if i == 1 or i % 10 == 0:
+                print("\n[JOIN REFUSED] %s" % e)
+                print("[JOIN] retrying in %.0f s (attempt %d/%d); Ctrl-C "
+                      "stops." % (delay, i, attempts))
+            else:
+                print("[JOIN] still waiting for the teacher (attempt %d/%d)..."
+                      % (i, attempts))
+            time.sleep(delay)
 
 
 def main():
@@ -46,12 +74,18 @@ def main():
     print("MiniMPI Worker version %s (protocol %d)"
           % (P.MINIMPI_VERSION, P.PROTOCOL_VERSION))
     try:
-        MPI.Init(server=args.server)        # connects/joins + COMM_WORLD
+        join_world(MPI, args.server)        # connects/joins + COMM_WORLD
     except VersionMismatch as e:
         print("\n[VERSION MISMATCH] %s" % e)
         print("Please update this student copy (git pull / re-download) "
               "and start the worker again.")
         sys.exit(2)
+    except JoinRefused as e:
+        # The copy is fine — the teacher stayed busy, or the world is full.
+        print("\n[JOIN REFUSED] %s" % e)
+        print("Start the worker again in a moment (or tell the teacher to "
+              "raise --size).")
+        sys.exit(3)
     try:
         comm = MPI.COMM_WORLD
         rank = comm.Get_rank()

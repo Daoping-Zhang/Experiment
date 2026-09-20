@@ -71,7 +71,20 @@ def Init(server=None):
     if server is not None:                     # worker side
         from .runtime import MiniRuntime
         rt = MiniRuntime(name="worker")
-        rt.register_with_teacher(server)       # internal MPI.Init work
+        try:
+            rt.register_with_teacher(server)   # internal MPI.Init work
+        except Exception:
+            # A failed join must leave NO half-open session: otherwise a retry
+            # would think MPI is already initialised and keep a leaked
+            # listener socket. (A refused join is retried in worker.py.)
+            _alive = False
+            COMM_WORLD = None
+            _session = None
+            try:
+                rt.close()
+            except Exception:
+                pass
+            raise
         comm = World(rt)
         rt.comm_world = comm
         COMM_WORLD = comm
@@ -214,9 +227,14 @@ class World:
         # released rank may already begin round 1 while rank 0 is still
         # sending releases).
         cb = None
+        arrival = None
         if self.rank == 0:
             cb = getattr(self._rt, "on_start_gathered", None)
-        B.barrier(self._rt.comm, 0, on_root_gathered=cb)
+            # per-rank arrival: lets rank 0 see WHO reached the start barrier
+            # (a stalled RUN can then name the ranks that went silent)
+            arrival = getattr(self._rt, "on_start_arrival", None)
+        B.barrier(self._rt.comm, 0, on_root_gathered=cb,
+                  on_root_arrival=arrival)
 
     def sync_round(self, rnd):
         """End of logical round rnd.

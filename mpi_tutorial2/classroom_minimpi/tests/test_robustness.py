@@ -13,6 +13,7 @@ and worker.py over TCP and check that the class never wedges:
 
 Every scenario has a hard deadline: a hang is a FAIL, never an infinite wait.
 """
+import json
 import os
 import re
 import signal
@@ -21,6 +22,17 @@ import subprocess
 import sys
 import tempfile
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from minimpi import protocol as _P       # noqa: E402  (version for the stub)
+
+
+def _version():
+    return _P.MINIMPI_VERSION
+
+
+def _protocol():
+    return _P.PROTOCOL_VERSION
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)                 # classroom_minimpi/
@@ -64,13 +76,14 @@ class Class:
     stdout pipe, and every log must stay readable while the test runs.
     """
 
-    def __init__(self, size, tmp, extra_teacher=(), teacher_env=None):
+    def __init__(self, name, size, tmp, extra_teacher=(), teacher_env=None):
+        self.name = name
         self.size = size
         self.port = free_port()
         self.tmp = tmp
         self.extra_teacher = list(extra_teacher)
         self.teacher_env = dict(teacher_env or {})
-        self.tag = "cap%d" % size
+        self.tag = name
         self.teacher = None
         self.workers = {}                 # tag -> Popen
         self._f = {}
@@ -120,6 +133,23 @@ class Class:
         self.teacher.stdin.write(text)
         self.teacher.stdin.flush()
 
+    def freeze(self, tag):
+        """Simulate a vanished machine: the process is alive but answers
+        nothing (no FIN is sent — exactly like a closed laptop lid)."""
+        p = self.workers.get(tag)
+        if p is not None and p.poll() is None:
+            os.kill(p.pid, signal.SIGSTOP)
+
+    def join_stub(self, settle=0.05):
+        """A control-plane client that joins and then dies without reading the
+        welcome (a student who closes the laptop right after clicking join)."""
+        s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        s.sendall((json.dumps({"t": "join", "host": "127.0.0.1", "port": 1,
+                               "version": _version(), "protocol": _protocol()})
+                   + "\n").encode())
+        time.sleep(settle)
+        s.close()
+
     def log(self, tag="teacher"):
         f = self._f.get(tag)
         if f is None:
@@ -162,7 +192,7 @@ class Class:
 # ---------------------------------------------------------------------------
 # A. a worker leaves while the class is idle -> roster compacts, RUN still works
 def scenario_leave_when_idle(tmp):
-    c = Class(4, tmp)
+    c = Class("A", 4, tmp)
     try:
         c.start_teacher()
         c.start_worker("w1")
@@ -194,7 +224,7 @@ def scenario_leave_when_idle(tmp):
 # ---------------------------------------------------------------------------
 # B. a latecomer joins after the lesson started -> free rank, world grows
 def scenario_latecomer_join(tmp):
-    c = Class(4, tmp)
+    c = Class("B", 4, tmp)
     try:
         c.start_teacher()
         c.start_worker("w1")
@@ -218,7 +248,7 @@ def scenario_latecomer_join(tmp):
 # ---------------------------------------------------------------------------
 # C. a worker disappears DURING a run -> ABORT, teacher stays usable
 def scenario_leave_during_run(tmp):
-    c = Class(3, tmp)
+    c = Class("C", 3, tmp)
     try:
         c.start_teacher()
         c.start_worker("w1")
@@ -262,7 +292,7 @@ def scenario_leave_during_run(tmp):
 # ---------------------------------------------------------------------------
 # D. watchdog: a rank never arrives -> RUN aborted, teacher exits
 def scenario_watchdog(tmp):
-    c = Class(2, tmp, extra_teacher=["--demo", "naive_allreduce",
+    c = Class("D", 2, tmp, extra_teacher=["--demo", "naive_allreduce",
                                      "--mode", "performance"],
               teacher_env={"MINIMPI_RUN_TIMEOUT": "5"})
     try:
@@ -285,7 +315,7 @@ def scenario_watchdog(tmp):
 # ---------------------------------------------------------------------------
 # E. the teacher disappears mid-run -> the worker unblocks and exits
 def scenario_teacher_gone(tmp):
-    c = Class(2, tmp)
+    c = Class("E", 2, tmp)
     try:
         c.start_teacher()
         c.start_worker("w1")
@@ -321,7 +351,7 @@ def scenario_burst_join(tmp):
     """Concurrent welcomes used to interleave on one control socket and leave
     workers with different world sizes; the next collective then paired ranks
     that disagreed and deadlocked. All three students join at once here."""
-    c = Class(4, tmp)
+    c = Class("F", 4, tmp)
     try:
         c.start_teacher()
         for tag in ("w1", "w2", "w3"):
@@ -360,6 +390,269 @@ def scenario_burst_join(tmp):
         c.close()
 
 
+# ---------------------------------------------------------------------------
+# G. a worker leaves while the teacher is paused at [ENTER]
+def scenario_leave_during_pause(tmp):
+    """Teaching mode pauses between rounds. A student leaving DURING that pause
+    must abort the run and cancel the pause (a stale ENTER wait used to eat the
+    next menu command)."""
+    c = Class("G", 3, tmp)
+    try:
+        c.start_teacher()
+        c.start_worker("w1")
+        c.wait_log(r"\[JOIN\] .* -> Rank 1 ", timeout=25)
+        c.start_worker("w2")
+        c.wait_log(r"\[JOIN\] .* -> Rank 2 ", timeout=25)
+        if not c.wait_menu(1, timeout=45):
+            check("G leave during pause: menu reached", False)
+            return
+        c.menu("3\n16\n1\n1\n")             # naive_allreduce / TEACHING
+        if not c.wait_log(r"\[ENTER\]", timeout=30):
+            check("G leave during pause: teacher reaches its ENTER pause",
+                  False)
+            return
+        check("G leave during pause: teacher reaches its ENTER pause", True)
+        kill(c.workers["w2"])               # student walks out mid-pause
+        check("G leave during pause: departure aborts the RUN",
+              c.wait_log(r"\[ABORT\] Rank 2 left during the run", timeout=25))
+        check("G leave during pause: the pause is cancelled, not left hanging",
+              c.wait_log(r"pause cancelled", timeout=25))
+        check("G leave during pause: teacher returns to its menu (no wedge)",
+              c.wait_count(r"World Size: 2 \(capacity 3, 1 student",
+                           1, timeout=45))
+        c.menu("3\n16\n2\n1\n")             # performance run, world size 2
+        check("G leave during pause: next RUN works",
+              c.wait_log(r"Running\.\.\.  \(World Size 2\)", timeout=30)
+              and c.wait_log(r"Collective complete", timeout=30)
+              and "final = 3" in c.log())
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------------
+# H. two workers leave back-to-back, then everybody leaves
+def scenario_back_to_back_leaves(tmp):
+    """Compaction renumbers ranks; the second departure must still be seen
+    (the leave handler used to look the worker up by its join-time rank)."""
+    c = Class("H", 4, tmp)
+    try:
+        c.start_teacher()
+        for tag, rank in (("w1", 1), ("w2", 2), ("w3", 3)):
+            c.start_worker(tag)
+            c.wait_log(r"\[JOIN\] .* -> Rank %d " % rank, timeout=25)
+        if not c.wait_menu(1, timeout=45):
+            check("H back-to-back leaves: menu reached", False)
+            return
+        kill(c.workers["w2"])
+        kill(c.workers["w3"])               # both gone at (nearly) once
+        # both must be released; the second one is named with its NEW rank
+        # (it was compacted from 3 to 2 before its departure was noticed)
+        check("H back-to-back leaves: both departures are seen",
+              c.wait_count(r"\[LEAVE\] Rank \d+ disconnected", 2, timeout=30))
+        if not c.wait_log(r"\[ROSTER\] Rank \d+ left  ->  World Size 2 "
+                          r"\(1 student ranks\)", timeout=25):
+            check("H back-to-back leaves: roster is compacted to 2", False)
+            return
+        check("H back-to-back leaves: roster is compacted to 2", True)
+        c.menu("3\n16\n2\n1\n")             # world size 2 -> 1+2 = 3
+        check("H back-to-back leaves: RUN works with the survivor",
+              c.wait_log(r"Running\.\.\.  \(World Size 2\)", timeout=30)
+              and c.wait_log(r"Collective complete", timeout=30)
+              and "final = 3" in c.log())
+        # ... and if EVERYBODY leaves, a run is Rank 0 alone (World Size 1)
+        kill(c.workers["w1"])
+        check("H back-to-back leaves: last departure is seen",
+              c.wait_log(r"\[LEAVE\] Rank 1 disconnected", timeout=25))
+        if not c.wait_log(r"\[ROSTER\] Rank \d+ left  ->  World Size 1 "
+                          r"\(0 student ranks\)", timeout=25):
+            check("H back-to-back leaves: empty class is reported", False)
+            return
+        check("H back-to-back leaves: empty class is reported", True)
+        c.menu("3\n16\n2\n1\n")
+        check("H empty class: a RUN as Rank 0 alone still completes",
+              c.wait_log(r"Running\.\.\.  \(World Size 1\)", timeout=30)
+              and c.wait_log(r"Collective complete", timeout=30))
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------------
+# I. a join that dies immediately (before reading its welcome)
+def scenario_dead_on_join(tmp):
+    c = Class("I", 3, tmp)
+    try:
+        c.start_teacher()
+        c.join_stub()                        # joins, then vanishes
+        check("I dead-on-join: the half-open joiner is released",
+              c.wait_log(r"\[LEAVE\] Rank \d+ disconnected", timeout=25))
+        c.start_worker("w1")
+        check("I dead-on-join: a real student gets Rank 1",
+              c.wait_log(r"\[JOIN\] .* -> Rank 1 ", timeout=25))
+        if not c.wait_menu(1, timeout=45):
+            check("I dead-on-join: menu reached", False)
+            return
+        c.menu("3\n16\n2\n1\n")
+        check("I dead-on-join: RUN works (world size 2, 1+2=3)",
+              c.wait_log(r"Running\.\.\.  \(World Size 2\)", timeout=30)
+              and c.wait_log(r"Collective complete", timeout=30)
+              and "final = 3" in c.log())
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------------
+# J. a FROZEN worker (no FIN at all) -> watchdog + exclusion
+def scenario_frozen_worker(tmp):
+    """SIGSTOP'ing a worker keeps its socket open and its kernel answering, so
+    no LEAVE can ever be detected — the stall watchdog must abort the run AND
+    drop the silent rank, otherwise every following RUN would stall again."""
+    c = Class("J", 3, tmp, teacher_env={"MINIMPI_RUN_TIMEOUT": "20"})
+    try:
+        c.start_teacher()
+        c.start_worker("w1")
+        c.wait_log(r"\[JOIN\] .* -> Rank 1 ", timeout=25)
+        c.start_worker("w2")
+        c.wait_log(r"\[JOIN\] .* -> Rank 2 ", timeout=25)
+        if not c.wait_menu(1, timeout=45):
+            check("J frozen worker: menu reached", False)
+            return
+        c.menu("3\n16\n1\n1\n")           # teaching run; w2 is frozen below
+        if not c.wait_log(r"Running\.\.\.  \(World Size 3\)", timeout=25):
+            check("J frozen worker: run started", False)
+            return
+        # wait for the teacher's Start Barrier pause: w2 must freeze BEFORE the
+        # release, so it never reaches round 1 while w1 does
+        c.wait_log(r"\[ENTER\] Start Collective", timeout=25)
+        c.freeze("w2")                       # no FIN, kernel still responsive
+        c.menu("\n")                        # release the start barrier
+        check("J frozen worker: the stall watchdog aborts the RUN",
+              c.wait_log(r"watchdog: no rank reported progress", timeout=45))
+        check("J frozen worker: the silent rank is named",
+              c.wait_log(r"silent=\[2\]", timeout=10))
+        check("J frozen worker: the silent rank is excluded",
+              c.wait_log(r"\[ROSTER\] excluding Rank 2", timeout=20))
+        if not c.wait_count(r"World Size: 2 \(capacity 3, 1 student",
+                            1, timeout=45):
+            check("J frozen worker: teacher is usable again", False)
+            return
+        check("J frozen worker: teacher is usable again", True)
+        c.menu("3\n16\n2\n1\n")
+        check("J frozen worker: the class continues without it",
+              c.wait_log(r"Running\.\.\.  \(World Size 2\)", timeout=35)
+              and c.wait_log(r"Collective complete", timeout=30)
+              and "final = 3" in c.log())
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------------
+# J2. keepalive is really applied (a vanished machine sends no FIN)
+def scenario_keepalive_options():
+    """A vanished machine sends no FIN: keepalive is what turns "silently
+    gone" into an ordinary disconnect (verified on a real TCP pair)."""
+    from minimpi import protocol as P
+    ln = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ln.bind(("127.0.0.1", 0))
+    ln.listen(1)
+    cl = socket.create_connection(ln.getsockname(), timeout=5)
+    srv, _ = ln.accept()
+    try:
+        ok = P.enable_keepalive(srv)
+        got = srv.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+        # macOS reports the raw value (not just 1) once keepalive is on
+        check("J2 keepalive: SO_KEEPALIVE is set on MiniMPI sockets",
+              bool(ok) and got != 0, "SO_KEEPALIVE=%s" % got)
+        idle = None
+        for opt in [getattr(socket, n, None)
+                    for n in ("TCP_KEEPIDLE", "TCP_KEEPALIVE")] + [0x10]:
+            if opt is None:
+                continue
+            try:
+                v = srv.getsockopt(socket.IPPROTO_TCP, opt)
+            except OSError:
+                continue
+            if 0 < v <= 60:
+                idle = v
+                break
+        check("J2 keepalive: an idle timeout is configured (not the OS "
+              "default 2 h)", idle is not None, "idle=%s" % idle)
+    finally:
+        for s_ in (srv, cl, ln):
+            try:
+                s_.close()
+            except OSError:
+                pass
+
+
+
+# ---------------------------------------------------------------------------
+# K. a worker leaves during the Performance Benchmark
+def scenario_leave_during_benchmark(tmp):
+    c = Class("K", 3, tmp, teacher_env={"MINIMPI_BENCH_SIZES": "16777216"})
+    try:
+        c.start_teacher()
+        c.start_worker("w1")
+        c.wait_log(r"\[JOIN\] .* -> Rank 1 ", timeout=25)
+        c.start_worker("w2")
+        c.wait_log(r"\[JOIN\] .* -> Rank 2 ", timeout=25)
+        if not c.wait_menu(1, timeout=45):
+            check("K benchmark leave: menu reached", False)
+            return
+        c.menu("7\n1\n")                    # benchmark, rank-0 value 1
+        if not c.wait_log(r"raw ", timeout=40):
+            check("K benchmark leave: the session starts", False)
+            return
+        check("K benchmark leave: the session starts", True)
+        kill(c.workers["w2"])               # leave in the middle of the cases
+        check("K benchmark leave: the session stops instead of printing "
+              "bogus rows",
+              c.wait_log(r"\[ABORT\] benchmark session cancelled", timeout=60))
+        check("K benchmark leave: the teacher returns to its menu",
+              c.wait_count(r"World Size: 2 \(capacity 3, 1 student",
+                           1, timeout=45))
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------------
+# L. joining WHILE a run is in flight -> refused, then the worker retries
+def scenario_join_during_run(tmp):
+    """A student who starts late (mid-run) must not die: the worker is refused,
+    waits, and joins as a latecomer once the run finishes."""
+    c = Class("L", 4, tmp)
+    try:
+        c.start_teacher()
+        c.start_worker("w1", env_extra={"MINIMPI_INPUT_DELAY": "12"})
+        c.wait_log(r"\[JOIN\] .* -> Rank 1 ", timeout=25)
+        if not c.wait_menu(1, timeout=45):
+            check("L join during run: menu reached", False)
+            return
+        c.menu("3\n16\n1\n1\n")             # teaching run; w1 is still "typing"
+        if not c.wait_log(r"Running\.\.\.  \(World Size 2\)", timeout=25):
+            check("L join during run: run started", False)
+            return
+        c.start_worker("w2")                # arrives in the middle of the run
+        check("L join during run: the latecomer is refused, not killed",
+              c.wait_log(r"\[JOIN REFUSED\]", timeout=30, tag="w2")
+              and c.wait_log(r"run is in progress", timeout=5, tag="w2"))
+        check("L join during run: the latecomer keeps trying",
+              c.wait_log(r"retrying in", timeout=30, tag="w2"))
+        # a teacher presses ENTER at EVERY pause: start barrier, each round,
+        # and the final close
+        c.menu("\n\n\n\n")
+        check("L join during run: the latecomer joins after the run",
+              c.wait_log(r"\[JOIN\] .* -> Rank 2 ", timeout=90))
+        check("L join during run: teacher re-welcomes the class",
+              c.wait_log(r"\[ROSTER\] Rank 1 re-welcomed", timeout=30))
+        c.menu("3\n16\n2\n1\n")             # world size 3 -> 1+2+3 = 6
+        check("L join during run: next RUN includes the latecomer",
+              c.wait_log(r"Running\.\.\.  \(World Size 3\)", timeout=40)
+              and c.wait_log(r"Collective complete", timeout=30)
+              and "final = 6" in c.log())
+    finally:
+        c.close()
+
+
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     tmp = tempfile.mkdtemp(prefix="minimpi_robustness_")
@@ -370,6 +663,13 @@ def main():
     scenario_watchdog(tmp)
     scenario_teacher_gone(tmp)
     scenario_burst_join(tmp)
+    scenario_leave_during_pause(tmp)
+    scenario_back_to_back_leaves(tmp)
+    scenario_dead_on_join(tmp)
+    scenario_keepalive_options()
+    scenario_frozen_worker(tmp)
+    scenario_leave_during_benchmark(tmp)
+    scenario_join_during_run(tmp)
     print("\nRobustness tests: %d passed, %d failed" % (len(_passed),
                                                         len(_failed)))
     if _failed:

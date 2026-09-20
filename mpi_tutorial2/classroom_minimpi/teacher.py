@@ -18,7 +18,7 @@ Usage:
 import argparse
 import base64
 import os
-import select
+import queue
 import socket
 import sys
 import threading
@@ -64,6 +64,8 @@ class Aggregator:
         self.last_progress = time.monotonic()   # watchdog: last sign of life
         self.activity_fn = None     # optional counter of rank-0 data activity
         self._activity = 0
+        self.last_seen = {}         # rank -> monotonic of its last sign of life
+        self.arrived = {}           # rnd -> set(rank) seen at that round barrier
 
     def worker_round_done(self, rank, rnd, events, send_ms=None, work_ms=None):
         with self.cv:
@@ -72,7 +74,8 @@ class Aggregator:
             if send_ms is not None:
                 self.timing.setdefault(rnd, {})[rank] = {"send": send_ms,
                                                          "work": work_ms}
-            self.last_progress = time.monotonic()
+            self.last_seen[rank] = time.monotonic()
+            self.last_progress = self.last_seen[rank]
             self.cv.notify_all()
 
     def worker_done(self, rank, value=None, error=None):
@@ -82,15 +85,54 @@ class Aggregator:
             self.done.add(rank)
             if value is not None:
                 self.results[rank] = value
-            self.last_progress = time.monotonic()
+            self.last_seen[rank] = time.monotonic()
+            self.last_progress = self.last_seen[rank]
             self.cv.notify_all()
 
-    def touch(self):
-        """Something moved (a rank arrived / a round finished): the watchdog
-        measures STALLS, not total wall time, so a teacher's ENTER pause does
-        not look like a hang as long as ranks keep reporting."""
+    def heartbeat(self, rank):
+        """A rank PROVED it is alive (control-plane heartbeat).
+
+        Liveness only: a healthy rank blocked in a barrier must not look like
+        run progress, or the stall watchdog would never fire for a frozen
+        peer."""
         with self.cv:
-            self.last_progress = time.monotonic()
+            self.last_seen[rank] = time.monotonic()
+
+    def silent_ranks(self, stale=None):
+        """The suspects when the watchdog fires.
+
+        A rank is a suspect when it completed nothing, reported nothing AND
+        stopped sending heartbeats: that is a frozen student (asleep laptop,
+        dead VM), which is the only way to tell it apart from a healthy rank
+        that is simply blocked in a barrier. A rank that is merely waiting
+        keeps heartbeating, so it is never dropped.
+        """
+        if stale is None:
+            import minimpi.protocol as _P
+            stale = _P.HEARTBEAT_STALE_S
+        with self.cv:
+            healthy = set(self.done)
+            for ranks in self.round_reports.values():
+                healthy |= ranks
+            now = time.monotonic()
+            return [r for r in range(1, self.size)
+                    if r not in healthy
+                    and now - self.last_seen.get(r, 0.0) >= stale]
+
+    def touch(self, rank=None, rnd=None):
+        """Something moved: the watchdog measures STALLS, not total wall time,
+        so a teaching pause never looks like a hang while ranks keep reporting.
+
+        `rank` (a rank that reached a round barrier) is remembered too, so the
+        suspects named by a stalled RUN are the ranks that really went quiet —
+        a healthy rank blocked in a barrier has said all it can say."""
+        with self.cv:
+            now = time.monotonic()
+            self.last_progress = now
+            if rank is not None:
+                self.last_seen[rank] = now
+                if rnd is not None:
+                    self.arrived.setdefault(rnd, set()).add(rank)
 
     def wait_round_events(self, rnd, need, timeout=30):
         with self.cv:
@@ -119,9 +161,10 @@ class Aggregator:
                         return False
                     continue
                 if self.activity_fn is not None:
-                    # data-plane traffic (e.g. rank 0's own collective events)
-                    # counts as progress even in performance mode, where
-                    # workers never report mid-run.
+                    # rank 0's own data-plane traffic counts as progress even in
+                    # performance mode, where workers never report mid-run.
+                    # (Liveness is tracked separately, by heartbeats: a healthy
+                    # rank blocked in a barrier must NOT look like progress.)
                     cur = self.activity_fn()
                     if cur != self._activity:
                         self._activity = cur
@@ -147,6 +190,8 @@ class Aggregator:
             self.errors.clear()
             self.aborted = None
             self.last_progress = time.monotonic()
+            self.last_seen = {}
+            self.arrived = {}
             self.active = True
 
 
@@ -183,6 +228,7 @@ class Coordinator:
         self.agg = None
         self.run_active = False      # True while a RUN is in flight
         self.roster_dirty = False    # roster changed during a RUN
+        self.exclude_suspects = {}   # ranks to drop after a stalled RUN
         self.abort_epoch = 0         # bumped on every abort (cancels pauses)
         self._roster_reset = True    # rank-0 peer cache needs rebuilding
         # teacher-clock timings (ns)
@@ -208,6 +254,12 @@ class Coordinator:
         """Current world size = rank 0 (teacher) + every joined worker."""
         with self.lock:
             return len(self.workers) + 1
+
+    def roster_snapshot(self):
+        """(active world size, worker ranks) — one consistent read, so the
+        menu / wait loop never iterate a dict another thread is editing."""
+        with self.lock:
+            return len(self.workers) + 1, sorted(self.workers)
 
     def _rebuild_roster_locked(self):
         """Keep worker ranks contiguous (1..N-1) after a join or a leave.
@@ -336,6 +388,36 @@ class Coordinator:
                       % ", ".join("%d -> %d" % mv for mv in moves))
             self._broadcast_roster(size, "Rank %d left" % rank)
 
+    def _exclude_suspects(self):
+        """Drop the ranks a stalled RUN never heard from.
+
+        A frozen student (asleep laptop, killed VM, dead Wi-Fi) leaves the
+        socket open, so there is no LEAVE to detect. Rather than stalling every
+        following RUN, the watchdog names the suspects and the class continues
+        without them — exactly what the teacher would do by hand."""
+        suspects, self.exclude_suspects = self.exclude_suspects, {}
+        if not suspects:
+            return
+        for rank, why in sorted(suspects.items()):
+            with self.lock:
+                conn = self.workers.get(rank)
+            if conn is None:
+                continue
+            print("[ROSTER] excluding Rank %d (%s) — the class continues "
+                  "without it" % (rank, why))
+            try:
+                conn.shutdown(socket.SHUT_RDWR)   # its reader thread then
+            except OSError:                       # reports the normal LEAVE
+                pass
+            try:
+                conn.close()
+            except OSError:
+                pass
+            with self.lock:
+                self.workers.pop(rank, None)
+                self.epid.pop(rank, None)
+            self.roster_dirty = True
+
     def _sync_roster_after_run(self):
         """Apply roster changes that arrived while a RUN was in flight."""
         if not getattr(self, "roster_dirty", False):
@@ -357,6 +439,9 @@ class Coordinator:
                 continue
             except OSError:
                 return
+            # A vanished student (lid closed / cable pulled) sends no FIN; with
+            # keepalive the reader fails and the normal LEAVE path runs.
+            P.enable_keepalive(conn)
             threading.Thread(target=self._handle_worker, args=(conn,),
                              daemon=True).start()
 
@@ -384,7 +469,8 @@ class Coordinator:
                        % (wv or "unknown/old copy", wp,
                           P.MINIMPI_VERSION, P.PROTOCOL_VERSION))
                 with self.ctrl_lock:
-                    P.ctrl_send(conn, {"t": P.C_ERROR, "why": why})
+                    P.ctrl_send(conn, {"t": P.C_ERROR, "code": "version",
+                                       "why": why})
                 print("[VERSION] rejected a worker: %s\n"
                       "[JOIN] %s -> REJECTED: %s" % (why, who, why))
                 return
@@ -395,17 +481,19 @@ class Coordinator:
                 with self.lock:
                     if self.run_active:
                         why = ("a collective run is in progress — wait for it "
-                               "to finish and join again")
-                        P.ctrl_send(conn, {"t": P.C_ERROR, "why": why})
+                               "to finish, then join again")
+                        P.ctrl_send(conn, {"t": P.C_ERROR, "code": "busy",
+                                           "why": why})
                         print("[JOIN] %s -> REJECTED: %s" % (who, why))
                         return
                     free = [r for r in range(1, self.size)
                             if r not in self.workers]
                     if not free:
-                        P.ctrl_send(conn, {"t": P.C_ERROR,
-                                           "why": "world already full"})
-                        print("[JOIN] %s -> REJECTED: world already full "
-                              "(size=%d)" % (who, self.size))
+                        why = ("world already full (capacity %d) — the "
+                               "teacher can raise --size" % self.size)
+                        P.ctrl_send(conn, {"t": P.C_ERROR, "code": "full",
+                                           "why": why})
+                        print("[JOIN] %s -> REJECTED: %s" % (who, why))
                         return
                     rank = free[0]                # lowest free rank
                     self.workers[rank] = conn
@@ -448,10 +536,15 @@ class Coordinator:
                 conn.close()
             except OSError:
                 pass
+            # Find the worker by CONNECTION, never by its join-time rank:
+            # compaction may have renumbered it, and a stale rank would make
+            # the departure invisible — the class would then wait forever for
+            # a rank that is already gone.
             with self.lock:
-                gone = rank is not None and self.workers.get(rank) is conn
-            if gone:
-                self._on_worker_left(rank, who)
+                cur = next((r for r, c in self.workers.items() if c is conn),
+                           None)
+            if cur is not None:
+                self._on_worker_left(cur, who)
 
     def _dispatch(self, rank, m):
         t = m.get("t")
@@ -471,6 +564,9 @@ class Coordinator:
             elif isinstance(val, dict) and "raw" in val:
                 val = base64.b64decode(val["raw"])
             agg.worker_done(rank, value=val, error=m.get("error"))
+        elif t == P.C_HEARTBEAT:
+            if agg:
+                agg.heartbeat(rank)      # alive and waiting (not frozen)
         elif t == P.C_ERROR:
             print("[ERROR from rank %d] %s" % (rank, m.get("why", "")))
 
@@ -489,9 +585,14 @@ class Coordinator:
         self._self_check()
         deadline = time.time() + 30
         while len(self._check_ok) < n and time.time() < deadline:
+            if self.active_size() != n:
+                print("[ROSTER] membership changed during the check — "
+                      "reporting what is known")
+                break
             time.sleep(0.1)
 
         fails = 0
+        unknown = 0
         for a in range(n):
             ok = self._check_ok.get(a, set())
             fail = self._check_fail.get(a, set())
@@ -501,10 +602,16 @@ class Coordinator:
                 status = "FAIL" if b in fail else ("PASS" if b in ok else "?")
                 if status == "FAIL":
                     fails += 1
+                elif status == "?":
+                    unknown += 1
                 print("Rank %d -> Rank %d  %s" % (a, b, status))
         if fails:
             print("\nP2P Network: NOT READY (%d failed edges)" % fails)
             return False
+        if unknown:
+            print("\nP2P Network: READY (%d edges unknown — a rank did not "
+                  "report)" % unknown)
+            return True
         print("\nP2P Network: READY")
         return True
 
@@ -577,10 +684,28 @@ class Coordinator:
                           % (agg.aborted, sorted(agg.done)))
                 else:
                     # Watchdog: a RUN that never finishes must not wedge the
-                    # lesson — abort it and return to the menu.
+                    # lesson — abort it, and remember who never reported so
+                    # the class can continue without them.
+                    silent = agg.silent_ranks()
                     self._abort_run(
                         "watchdog: no rank reported progress for %ds "
-                        "(done=%s)" % (timeout, sorted(agg.done)))
+                        "(done=%s%s)" % (timeout, sorted(agg.done),
+                                         ", silent=%s" % silent if silent
+                                         else ""))
+                    if not silent:
+                        print("[ROSTER] no rank could be singled out — if this "
+                              "repeats, ask a student to restart their worker")
+                        print("[ROSTER] watchdog evidence: arrived=%s "
+                              "reports=%s last_seen=%s"
+                              % ({k: sorted(v) for k, v
+                                  in sorted(agg.arrived.items())},
+                                 {k: sorted(v) for k, v
+                                  in sorted(agg.round_reports.items())},
+                                 {r: "%.1fs ago" % (time.monotonic() - t)
+                                  for r, t in sorted(agg.last_seen.items())}))
+                    for r in silent:
+                        self.exclude_suspects[r] = (
+                            "no progress for %ds" % timeout)
         finally:
             with self.ctrl_lock:
                 self.run_active = False
@@ -590,6 +715,7 @@ class Coordinator:
             self._join_rank0_thread()
             self.comm0.default_timeout = None
             self.transport.abort_pending(False)
+            self._exclude_suspects()
             self._sync_roster_after_run()
         # Collective Time ends when ALL ranks reported C_DONE (the collective
         # really finished everywhere) — student input / RUN control / Start
@@ -763,8 +889,8 @@ class Coordinator:
         last = rnd >= total
         print("\nAll ranks finished Round %d / %d." % (rnd, total))
         if not self.auto:
-            ask_enter(coord, "\n[ENTER] %s" % ("Close Collective" if last
-                                               else "Next Round"))
+            ask_enter(self, "\n[ENTER] %s" % ("Close Collective" if last
+                                              else "Next Round"))
         elif os.environ.get("MINIMPI_TEACH_PAUSE"):
             time.sleep(float(os.environ["MINIMPI_TEACH_PAUSE"]))
         # gather time was fixed BEFORE the pause, so round timing excludes it
@@ -803,7 +929,7 @@ class Coordinator:
             arrival_ns = now_ns()
         self._timing["ready"].setdefault(rnd, {})[src] = arrival_ns
         if self.agg is not None:
-            self.agg.touch()        # a rank reached the barrier = progress
+            self.agg.touch(src, rnd)   # this rank reached the barrier
 
     def note_gather_ready(self, rnd):
         """All barrier tokens gathered: record gather time and freeze the
@@ -893,6 +1019,10 @@ class _Rank0Rt:
         # work for the round finished (before the round barrier) — the
         # "rank 0 ready" instant on the teacher's own clock.
         self.on_local_work_done = lambda rnd: coord.note_rank0_ready(rnd)
+        # Start Barrier: rank 0 records every rank that really arrived, so a
+        # stalled RUN can name the ranks that went quiet.
+        self.on_start_arrival = (
+            lambda src, ns: coord.note_rank_arrival(0, src, ns))
 
     @property
     def size(self):
@@ -957,30 +1087,62 @@ def _fmt_value(v):
     return str(v)
 
 
-def ask_enter(coord, prompt):
-    """Teaching pause that can be CANCELLED.
+_STDIN_Q = None
+_STDIN_LOCK = threading.Lock()
 
-    The pause runs on rank 0's algorithm thread, while the menu reads stdin on
-    the main thread. If a RUN is aborted while the teacher is still at an
-    ENTER prompt, a plain input() there would later swallow the next menu
-    command and leave the class unable to start a run — so instead we watch
-    the coordinator's abort counter and give up as soon as the run dies.
+
+def _stdin_pump():
+    """Read stdin forever, one line at a time, into a queue.
+
+    ONE thread owns stdin for the whole teacher process. Both the menu and the
+    teaching pauses read from that queue, so a line can never hide in Python's
+    text buffer: the menu's input() used to swallow buffered ENTERs (piped
+    lessons, or a teacher pressing ENTER twice), after which the pause waited
+    forever while its input sat unread — exactly how a class ended up "unable
+    to run".
     """
-    epoch = getattr(coord, "abort_epoch", 0)
+    while True:
+        try:
+            line = sys.stdin.readline()
+        except (OSError, ValueError):
+            line = ""
+        if line == "":                    # EOF / closed stdin
+            _STDIN_Q.put(None)
+            return
+        _STDIN_Q.put(line.rstrip("\n"))
+
+
+def read_line(prompt, coord=None):
+    """Print `prompt` and read one line. With `coord`, return "" instead of
+    blocking when that RUN is aborted or the teacher is shutting down."""
+    global _STDIN_Q
+    with _STDIN_LOCK:
+        if _STDIN_Q is None:
+            _STDIN_Q = queue.Queue()
+            threading.Thread(target=_stdin_pump, daemon=True).start()
     sys.stdout.write(prompt)
     sys.stdout.flush()
+    epoch = getattr(coord, "abort_epoch", 0) if coord is not None else None
     while True:
-        if getattr(coord, "abort_epoch", 0) != epoch:
-            print("\n(pause cancelled: this RUN was aborted)")
-            return ""
         try:
-            ready, _, _ = select.select([sys.stdin], [], [], 0.2)
-        except (OSError, ValueError):
-            return input("")
-        if ready:
-            return sys.stdin.readline()
-        if coord.closed:
+            line = _STDIN_Q.get(timeout=0.2)
+        except queue.Empty:
+            if coord is None:
+                continue
+            if getattr(coord, "abort_epoch", 0) != epoch:
+                print("\n(pause cancelled: this RUN was aborted)")
+                return ""
+            if coord.closed:
+                return ""
+            continue
+        if line is None:                  # EOF: never hang on a dead stdin
             return ""
+        return line
+
+
+def ask_enter(coord, prompt):
+    """Teaching pause that can be CANCELLED (see read_line)."""
+    return read_line(prompt, coord=coord)
 
 
 def _run_timeout():
@@ -1013,6 +1175,12 @@ def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True,
             vector_len = n
         else:
             vector_len = 4
+    if payload and n > 1 and payload % n and payload // n > 0:
+        keep = (payload // n) * n
+        print("[warn] Local Payload per Rank %s is not divisible by World Size "
+              "%d (Ring sends equal chunks); using %s"
+              % (fmt_bytes(payload), n, fmt_bytes(keep)))
+        payload = keep
     if algo == "ring_allreduce" and vector_len % n:
         vector_len = ((vector_len + n - 1) // n) * n
         print("(ring requires Data Size divisible by World Size; "
@@ -1077,6 +1245,19 @@ BENCH_SIZES = _bench_sizes()
 BENCH_RUNS = 3
 
 
+def _bench_skip(algo, payload_bytes, size):
+    """Cases the CURRENT roster cannot run honestly.
+
+    Both are reachable in a real classroom now that the roster changes: a
+    class of 3 ranks cannot run Recursive Doubling (power-of-two only), and
+    its payloads are not all divisible by 3 (Ring sends equal chunks)."""
+    if algo == "recursive_doubling_allreduce" and not _pow2(size):
+        return ("requires a power-of-two world size (have %d)" % size)
+    if algo == "ring_allreduce" and size and payload_bytes % size:
+        return ("payload is not divisible by the world size %d" % size)
+    return None
+
+
 def _median(vals):
     s = sorted(vals)
     n = len(s)
@@ -1095,6 +1276,11 @@ def _elem_rows():
 def run_benchmark(coord):
     """Performance Benchmark session: each rank enters ONE value, then 3
     algorithms x len(BENCH_SIZES) sizes x 3 runs run automatically;\n    results are medians and the summary is shown on EVERY rank."""
+    if coord.active_size() < 2:
+        print("\n[ROSTER] No student ranks are connected (World Size %d) — "
+              "a benchmark needs at least one worker." % coord.active_size())
+        print("[ROSTER] Start a student worker and choose 7 again.")
+        return
     print("\n========================================\n"
           "Performance Benchmark\n"
           "========================================")
@@ -1109,7 +1295,7 @@ def run_benchmark(coord):
     print("The same local value will be reused for all benchmark cases.")
 
     if sys.stdin.isatty():          # interactive menu: rank 0 types once
-        raw = input("\nYour benchmark value (Rank 0, default 1):\n> ").strip()
+        raw = read_line("\nYour benchmark value (Rank 0, default 1):\n> ").strip()
         try:
             v0 = int(raw)
         except ValueError:
@@ -1122,11 +1308,27 @@ def run_benchmark(coord):
                                                     "mode": "performance"}})
 
     rows = {a: {} for a in BENCH_ALGORITHMS}
+    skipped = []
     total = len(BENCH_ALGORITHMS) * len(BENCH_SIZES) * BENCH_RUNS
     done = 0
+    cancelled = None
+    size0 = coord.active_size()      # a stable world size is the whole point
     for a in BENCH_ALGORITHMS:
         for b in BENCH_SIZES:
             times = []
+            if coord.active_size() != size0:
+                cancelled = ("the world size changed during the session "
+                             "(%d -> %d)" % (size0, coord.active_size()))
+                break
+            why = _bench_skip(a, b, size0)
+            if why:
+                # never record a time for a case this world cannot run: the
+                # table would silently show meaningless numbers
+                print("[skip] %s %s = %d elem: %s"
+                      % (a, fmt_bytes(b), b // P.ELEMENT_BYTES, why))
+                rows[a][b] = None
+                skipped.append((a, b, why))
+                continue
             # every real benchmark case is explicitly a benchmark_case (no
             # re-prompt on worker) and rank 0 carries its OWN payload bytes
             # derived from the value entered once at setup.
@@ -1135,13 +1337,37 @@ def run_benchmark(coord):
                 agg = run_demo(coord, a, "performance", payload=b,
                                show=False, silent=True, kind="benchmark_case",
                                value0=payload0)
+                if agg is not None and agg.aborted:
+                    # a rank left / the watchdog fired: stop the session
+                    # instead of filling the table with meaningless runs
+                    cancelled = agg.aborted
+                    break
                 cms = coord.collective_ms()
                 ms = cms if cms is not None else 0.0
                 times.append(ms)
                 done += 1
                 print("raw %s %d run%d %.3f ms  (%d / %d)" %
                       (a, b, k + 1, ms, done, total))
+            if cancelled:
+                break
             rows[a][b] = _median(times)
+        if cancelled:
+            break
+
+    if cancelled:
+        print("\n[ABORT] benchmark session cancelled: %s" % cancelled)
+        print("[ABORT] %d of %d raw runs had completed; no summary is "
+              "printed because the world size changed mid-session." %
+              (done, total))
+        print("[ROSTER] World Size is now %d — run the benchmark again to get "
+              "a consistent table." % coord.active_size())
+        coord.send_to_workers(
+            {"t": P.C_RUN, "params": {"kind": "benchmark_done",
+                                      "mode": "performance",
+                                      "summary": "Benchmark cancelled: %s"
+                                                 % cancelled}})
+        print("\nBenchmark Cancelled.\n\nReturning to Teacher menu...")
+        return
 
     summary = ["\n" + "=" * 78,
                "Performance Benchmark Results",
@@ -1153,15 +1379,24 @@ def run_benchmark(coord):
     header = "".join(c.ljust(w) for c, w in zip(cols, widths))
     summary.append(header)
     summary.append("-" * len(header))
+    def cell(algo, b):
+        v = rows[algo][b]
+        return "%7.2f ms" % v if isinstance(v, (int, float)) else "n/a".rjust(10)
+
     for b in BENCH_SIZES:
         line = ("%s  = %d elem" % (fmt_bytes(b), b // P.ELEMENT_BYTES)).ljust(
             widths[0])
-        line += ("%7.2f ms" % rows["naive_allreduce"][b]).ljust(widths[1])
-        line += ("%7.2f ms" % rows["recursive_doubling_allreduce"][b]
-                 ).ljust(widths[2])
-        line += ("%7.2f ms" % rows["ring_allreduce"][b]).ljust(widths[3])
+        line += cell("naive_allreduce", b).ljust(widths[1])
+        line += cell("recursive_doubling_allreduce", b).ljust(widths[2])
+        line += cell("ring_allreduce", b).ljust(widths[3])
         summary.append(line)
     summary.append("\nLower is better.")
+    if skipped:
+        summary.append("\nSkipped for World Size %d (the table shows n/a):"
+                       % size0)
+        for a, b, why in skipped:
+            summary.append("  %s @ %s = %d elem: %s"
+                           % (a, fmt_bytes(b), b // P.ELEMENT_BYTES, why))
     print("\n".join(summary))
     # show the same summary table on EVERY student rank
     coord.send_to_workers(
@@ -1220,13 +1455,26 @@ def wait_ready(coord, size, require_full=True, quiesce=3.0):
                        rebuilt live between RUNs.
     """
     if require_full:
-        last = len(coord.workers) + 1
-        print("\nWaiting for ranks (%d/%d)..." % (last, size))
-        while len(coord.workers) + 1 < size:
-            cur = len(coord.workers) + 1
-            if cur != last:                      # live feedback per join
+        cur, _ = coord.roster_snapshot()
+        last, last_note = cur, time.time()
+        print("\nWaiting for ranks (%d/%d)..." % (cur, size))
+        while cur < size:
+            cur, have = coord.roster_snapshot()
+            if cur != last:                      # live feedback per change
+                if cur < last:                   # somebody left while waiting
+                    print("[ROSTER] a rank left before the world was ready: "
+                          "%d/%d — waiting for a replacement" % (cur, size))
                 print("Waiting for ranks (%d/%d)..." % (cur, size))
-                last = cur
+                last, last_note = cur, time.time()
+            elif time.time() - last_note > 20:
+                # a demo / benchmark really needs the full size: say which
+                # ranks are missing instead of looking hung
+                print("[ROSTER] waiting for the full world (%d/%d): have rank "
+                      "0%s; missing %s"
+                      % (cur, size, "".join(", %d" % r for r in have),
+                         ", ".join(str(r) for r in range(1, size)
+                                   if r not in have)))
+                last_note = time.time()
             time.sleep(0.4)
         print("MPI World Ready: %d / %d ranks (%d student workers)\n"
               % (size, size, size - 1))
@@ -1319,18 +1567,19 @@ def main():
         while True:
             print("\n========================================\nMiniMPI Classroom\n"
                   "========================================")
-            n = coord.active_size()
+            n, have = coord.roster_snapshot()
             print("World Size: %d (capacity %d, %d student ranks)"
                   "   MPI World Ready: %d ranks\n"
                   % (n, args.size, n - 1, n))
             if n < 2:
                 print("[ROSTER] Nobody has joined yet — start a student "
                       "worker (scripts/start_worker_mac.command) and this "
-                      "menu will pick it up.")
+                      "menu will pick it up. A RUN now would be Rank 0 alone "
+                      "(World Size 1 is not a collective).")
             for i, (label, _) in enumerate(MENU, 1):
                 print("%d. %s" % (i, label))
             try:
-                choice = input("\nSelect: ").strip()
+                choice = read_line("\nSelect: ").strip()
             except (EOFError, KeyboardInterrupt):
                 break
             if choice in ("9", "exit"):
@@ -1349,8 +1598,9 @@ def main():
 
             # --- interactive run setup: data size -> rank0 value -> mode ---
             print("\nAlgorithm: %s" % algo)
-            ds_raw = input("\nData Size (elements, int32 = %d B/elem, default 16):\n> "
-                           % P.ELEMENT_BYTES).strip()
+            ds_raw = read_line(
+                "\nData Size (elements, int32 = %d B/elem, default 16):\n> "
+                % P.ELEMENT_BYTES).strip()
             try:
                 ds = int(ds_raw) if ds_raw.isdigit() and int(ds_raw) > 0 else 16
             except ValueError:
@@ -1358,9 +1608,9 @@ def main():
             print("\nMode:")
             print("1. Teaching")
             print("2. Performance")
-            m = input("\nSelect: ").strip()
+            m = read_line("\nSelect: ").strip()
             mode = "teaching" if m != "2" else "performance"
-            v = input("\nYour value (Rank 0, default 1):\n> ").strip()
+            v = read_line("\nYour value (Rank 0, default 1):\n> ").strip()
             try:
                 v0 = int(v)
             except ValueError:

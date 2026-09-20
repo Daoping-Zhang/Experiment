@@ -126,7 +126,32 @@ world size is rank 0 + the workers that are here now, and it may differ.
   sending that RUN, so a join/leave can never rewrite the roster in between.
   The coordinator's roster lock is an RLock: helpers re-read the roster while
   a caller already holds it (a plain Lock self-deadlocked the joining thread).
-* New automated suite `tests/test_robustness.py`: 25 checks over real
+* Flow-by-flow audit of "what if a worker leaves NOW": every stage was
+  walked (handshake, waiting for the roster, network check, idle menu, inside
+  a RUN, teacher ENTER pause, two simultaneous leaves, frozen process, vanished
+  machine, benchmark session, empty class, join-during-run, world size change)
+  and each gap found is fixed:
+  * leave detection now matches by CONNECTION, so a worker that was renumbered
+    by compaction is still released (a stale rank used to hide the departure).
+  * STALL WATCHDOG names the suspects: workers send a `heartbeat` control
+    message every 2 s (stale after 6 s) and the ranks that stopped
+    heartbeating are DROPPED from the roster (`[ROSTER] excluding Rank r`), so
+    a frozen student no longer stalls every following RUN. Heartbeats prove
+    liveness only, never progress, or the watchdog could never fire.
+  * TCP keepalive (8 s idle + 3 probes x 2 s) on control and data sockets, so
+    a machine that vanishes without a FIN is an ordinary disconnect.
+  * join refusals carry a code (`version` / `busy` / `full`): a student who
+    starts their worker during a run no longer sees a bogus
+    "VERSION MISMATCH" — they get `[JOIN REFUSED]` and the worker RETRIES
+    every 3 s (up to 60 times), joining as a latecomer once the run ends.
+  * benchmark: cases the CURRENT world size cannot run are skipped and shown
+    as `n/a` (RD needs a power-of-two world; Ring needs a payload divisible by
+    the world size), and a session whose world size changed or whose RUN was
+    aborted is cancelled instead of printing a table of meaningless numbers.
+  * teacher input: ONE thread owns stdin (`read_line`); the menu's input() used
+    to swallow buffered ENTERs, after which a teaching pause waited forever
+    while its input sat unread ("everyone typed a number and it would not run").
+* New automated suite `tests/test_robustness.py`: 54 checks over real
   teacher/worker processes — leave while idle, late join, leave during a run
   (no hang, menu still usable, next RUN correct), watchdog, teacher
   disappears, and a BURST join (three students join at once; every rank must
@@ -180,7 +205,8 @@ test_teaching_semantics (G-K), test_timing_worker (L-S),
 test_final_behavior (T-Z: RD topology/correctness, LOCAL TIMELINE semantics,
 synchronization window, benchmark one-input/no-zero-data-size/median-summary),
 test_version_guard (join-time version refusal), test_robustness (join / leave /
-abort / watchdog / teacher-gone / burst-join, real processes), verify.py.
+abort / watchdog / frozen peer / teacher-gone / burst-join / benchmark leave /
+join-during-run, real processes), verify.py.
 
 ## Remaining Issues
 

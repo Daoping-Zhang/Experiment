@@ -15,6 +15,7 @@ import dataclasses
 import queue
 import socket
 import threading
+import time
 
 from . import protocol as P
 from . import mpi as M
@@ -68,12 +69,15 @@ class ClassroomWorker:
         inst._q = queue.Queue()
         inst._reader = threading.Thread(target=inst._read_loop, daemon=True)
         inst._reader.start()
+        inst._beat = threading.Thread(target=inst._heartbeat_loop, daemon=True)
+        inst._beat.start()
         return inst
 
     def __init__(self):
         self._rt = None
         self._q = None
         self._reader = None
+        self._beat = None
         self._benchmark_value = None
         self._benchmark_announced = False
 
@@ -120,10 +124,24 @@ class ClassroomWorker:
         self._benchmark_announced = False
 
     def close(self):
-        self._rt = None
+        self._rt = None                # also stops the heartbeat thread
         self._benchmark_value = None
 
     # ------------------------------------------------------------- control
+    def _heartbeat_loop(self):
+        """Tell the teacher we are alive while we wait.
+
+        A rank blocked in a barrier looks exactly like a frozen rank on the
+        data plane; the heartbeat is what separates "waiting" from "gone", so a
+        stalled RUN can name the student whose machine stopped answering."""
+        while self._rt is not None and self._rt.control is not None:
+            try:
+                self._rt.control.send({"t": P.C_HEARTBEAT,
+                                       "rank": self._rt.rank})
+            except OSError:
+                return
+            time.sleep(P.HEARTBEAT_S)
+
     def _read_loop(self):
         rt = self._rt
         why = "teacher closed the control connection"

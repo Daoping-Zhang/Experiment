@@ -81,6 +81,8 @@ class PeerTransport:
                 continue
             except OSError:
                 return
+            # a peer whose machine vanished must fail (not block) our reads
+            P.enable_keepalive(conn)
             t = threading.Thread(target=self._reader_loop, args=(conn,), daemon=True)
             t.start()
             self._reader_threads.append(t)
@@ -137,6 +139,7 @@ class PeerTransport:
                 return conn
             conn = socket.create_connection((host, port), timeout=8.0)
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            P.enable_keepalive(conn)
             self._out[rank] = conn
             return conn
 

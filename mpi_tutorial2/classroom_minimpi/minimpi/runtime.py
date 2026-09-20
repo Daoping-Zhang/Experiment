@@ -22,6 +22,16 @@ class VersionMismatch(RuntimeError):
     """Worker and teacher are not the same MiniMPI version (refused at join)."""
 
 
+class JoinRefused(RuntimeError):
+    """The teacher refused this join for a NON-version reason: a collective
+    run is in flight ("busy") or the world is full ("full"). The student just
+    has to try again — their copy is fine."""
+
+    def __init__(self, why, code="busy"):
+        super().__init__(why)
+        self.code = code
+
+
 def _worker_version():
     # test-only hook: pretend to be another version to exercise the guard
     return os.environ.get("MINIMPI_FAKE_VERSION") or P.MINIMPI_VERSION
@@ -38,6 +48,7 @@ class SendRecvControl:
     def __init__(self, host, port, timeout=8.0):
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(None)
+        P.enable_keepalive(self.sock)
         self.lock = threading.Lock()
 
     def send(self, obj):
@@ -153,7 +164,13 @@ class MiniRuntime:
         if welcome is None:
             raise RuntimeError("teacher closed the control connection")
         if welcome.get("t") == P.C_ERROR:
-            raise VersionMismatch(welcome.get("why", "teacher refused join"))
+            # Only a real version mismatch is a version mismatch: "busy" or
+            # "full" must not tell a student to update their copy.
+            code = welcome.get("code", "version")
+            why = welcome.get("why", "teacher refused join")
+            if code == "version":
+                raise VersionMismatch(why)
+            raise JoinRefused(why, code)
         if welcome.get("t") != P.C_WELCOME:
             raise RuntimeError("did not receive welcome from teacher")
         tv = welcome.get("version")

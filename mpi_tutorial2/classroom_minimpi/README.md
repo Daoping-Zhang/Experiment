@@ -256,7 +256,8 @@ worker : [VERSION MISMATCH] ... Please update this student copy (git pull /
 | 加入（含迟到） | 分配**最小空闲 rank**，world size +1，打印 `[JOIN]`；给其它 rank 重发 `C_WELCOME` 更新 peers | 新同学打印 `[ROSTER] You are now Rank r / n` |
 | 空闲时退出 | 打印 `[LEAVE]`；**rank 压缩成连续的 1..N-1**，打印 `[ROSTER] rank compaction` 并重新 welcome 每个 rank | 剩余同学看到自己 rank 变了（数据面 TCP 连接会重建，不需要重启） |
 | 正在跑时退出 | 打印 `[LEAVE] Rank r disconnected (during a RUN)`，立刻 `[ABORT]`：给剩余 rank 发 `C_ABORT`，**取消所有正在阻塞的 recv** | 该 RUN 打印 `[ABORT] this RUN ended early: ...`，随后回到等待下一次 RUN（进程不退出） |
-| 某个 rank 卡死 | **停车看门狗**：超过 `MINIMPI_RUN_TIMEOUT`（默认 600 s，按"无任何进展"计）无进展就 abort 整个 RUN 并回到菜单 | 同上 |
+| 某个 rank 卡死（进程还活着但完全不动） | **停车看门狗**：超过 `MINIMPI_RUN_TIMEOUT`（默认 600 s，按"无任何进展"计）无进展就 abort，并**点名 + 剔除**那个不再发心跳的 rank（`[ROSTER] excluding Rank r`），课堂用剩下的人继续 | 该 RUN abort；被剔除的同学唤醒后会看到控制连接断开并退出，重启 worker 即可重新加入 |
+| 学生机器"消失"（合盖/拔网线，不发 FIN） | 数据面 + 控制面都开了 **TCP keepalive**（idle 8 s + 2 s×3 次探测），于是它会像正常掉线一样被 `[LEAVE]` 发现 | 同上（该 rank 被正常移除） |
 | 正在跑时 teacher 消失 | —— | worker 控制连接断开 → 取消阻塞 recv → 打印原因后正常退出，不会永久卡死 |
 | 讲课停在 `[ENTER]` 时发生 abort | 暂停会被取消（`(pause cancelled: this RUN was aborted)`），不会吞掉下一条菜单输入 | 该 RUN abort，菜单可继续用 |
 
@@ -267,7 +268,25 @@ worker : [VERSION MISMATCH] ... Please update this student copy (git pull /
   算法照旧抛异常结束，教学语义（轮次/视图/timing）保持冻结。
 - 每次成员变化后数据面 peers 会重建（按 rank 缓存的出站连接必须失效），否则压缩后的
   rank 会复用到别人的连接——这是最容易出错的地方，`PeerTransport.reset_peers()` 专门处理它。
-- 这些场景都有自动化验收：`python3 tests/test_robustness.py`（25 项检查，全部真实进程）。
+- 这些场景都有自动化验收：`python3 tests/test_robustness.py`（**54 项检查，全部真实进程**）。
+
+#### 逐流程审计：worker 在哪个时刻退出会怎样
+
+| Worker 退出的时刻 | 行为 | 课堂是否卡住 |
+| --- | --- | --- |
+| 刚连上、还没读完 welcome 就断（"点完就合盖"） | teacher 按连接（不是按 rank）识别退出，打印 `[LEAVE]` 并压缩 rank | 不会 |
+| 等待同学到齐（`--demo/--benchmark` 要求满员） | 打印 `[ROSTER] a rank left before the world was ready`，并每 20 s 说明还缺哪些 rank | 不会（但 demo 仍要等到满员，这是约定） |
+| 网络自检（Network Check）中途退出 | 检测到成员变化就提前结束检查，未知边标 `?` 并注明 "N edges unknown" | 不会 |
+| 空闲（菜单停在 `Select:`） | `[LEAVE]` + rank 压缩 + 重新 welcome | 不会 |
+| RUN 进行中（collective 阻塞中） | 立即 `[ABORT]`：给其他人 `C_ABORT`，取消所有阻塞中的 recv | 不会 |
+| 讲课停在 `[ENTER]` 时退出 | 同上，且暂停被取消（`pause cancelled`），不会吞掉下一条菜单输入 | 不会 |
+| 两个人几乎同时退出 | 两次退出都被识别（按连接查找，rank 变了也认得），压缩后仍然一致 | 不会 |
+| 进程冻住（`SIGSTOP`/睡眠，不发 FIN） | 心跳停止 → 看门狗 abort + 点名 + 剔除 | 不会 |
+| 机器消失（合盖/断网，不发 FIN） | TCP keepalive → 当成普通掉线 | 不会 |
+| 性能 Benchmark 进行中退出 | 立刻取消整个 benchmark session（不发一张全是 0.00/n/a 的表），回到菜单 | 不会 |
+| 全部同学都退出（World Size 变成 1） | 菜单提示"现在跑就是 Rank 0 一个人"；此时 RUN 仍能正常完成 | 不会 |
+| RUN 进行中有人**想加入** | 明确拒绝（`code=busy`），worker 端不再是 `VERSION MISMATCH` 而是 `[JOIN REFUSED]`，并且**自动每 3 秒重试最多 60 次**，RUN 一结束就作为迟到者加入 | 不会 |
+| 世界人数变了（3 人班） | Benchmark 里 RD（需要 2 的幂）与"载荷不能被 3 整除"的 Ring 会打印 `[skip]`，表里显示 `n/a`，不再记录无意义的数字 | 不会 |
 
 **并发正确性（踩过的坑，已修）**：加入/退出/RUN 分别由不同线程处理，所以控制面发送被
 **串行化**（`Coordinator.ctrl_lock`）——否则两次并发的 `welcome` 会在同一个 socket 上交错，
@@ -333,7 +352,7 @@ teacher 打印 Start Barrier 块、ENTER 后开跑）。每轮固定结构：
 `src,dst,tag,fmt,plen,rnd,phase,algo`；payload 始终 raw bytes（benchmark 不用 JSON/base64 污染数据）。控制面：逐行 JSON。
 
 控制面消息（课堂基础设施，不是 MPI API）：`join / welcome / run / round_done / done /
-check / check_report / abort / shutdown`。其中 `welcome` 会在**任何成员变化后重发**用于更新
+check / check_report / heartbeat / abort / shutdown`。其中 `welcome` 会在**任何成员变化后重发**用于更新
 rank/size/peers；`abort` 只用于"这个 RUN 不可能完成了"（有人退出 / 看门狗）。
 
 ## 6. 限制与边界（README 声明的教学边界）
@@ -343,6 +362,7 @@ rank/size/peers；`abort` 只用于"这个 RUN 不可能完成了"（有人退�
 - payload `op` 默认 `sum`（int 向量逐元素和）；`raw` 大消息用 `xor`（大整数按位，纯 stdlib 也快）。
 - **这不是生产 MPI**：它只为教学复现"通信模型 / 热点 / 步数 / transfer time / effective bandwidth"，不要声称性能等同真实 MPI；校园网噪声大，benchmark 不设硬性 pass/fail 阈值。
 - 环境变量 `MINIMPI_TEACH_PAUSE`（auto 模式模拟 ENTER）、`MINIMPI_INPUT_DELAY`（模拟慢输入）、`MINIMPI_LOCAL_VIEW_DELAY`（模拟慢终端）、`MINIMPI_LOCAL_WORK_DELAY`（模拟慢 rank 本地工作）、`MINIMPI_SHOW_WORK`（debug）均为 **test-only / 自动化钩子**，课堂交互不使用它们。
+- 心跳：worker 每 `HEARTBEAT_S = 2.0 s` 发一条 `heartbeat`，teacher 超过 `HEARTBEAT_STALE_S = 6.0 s` 没收到就认为这个 rank "不再说话"。心跳只证明"活着"，不算"有进展"——否则看门狗永远不会为一个冻住的 rank 触发。
 - 课堂鲁棒性相关：`MINIMPI_RUN_TIMEOUT`（默认 600 s）是**停车看门狗**——按"多久没有任何 rank 上报进展"计，
   不是总时长；所以老师在每轮之间讲解很久没问题，但真要卡死会被 abort。若某轮讲解会超过这个时间，
   把它调大（`MINIMPI_RUN_TIMEOUT=1800`）。

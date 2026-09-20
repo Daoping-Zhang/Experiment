@@ -327,7 +327,8 @@ teacher opened) from **active size** (rank 0 + the workers that are here now):
 | Join (including late) | Assigns the **lowest free rank**, world size +1, logs `[JOIN]`; re-sends `C_WELCOME` to the others with the new peers | The newcomer prints `[ROSTER] You are now Rank r / n` |
 | Leave while idle | Logs `[LEAVE]`; **compacts ranks to a contiguous 1..N-1**, logs `[ROSTER] rank compaction` and re-welcomes every worker | Remaining students see their rank change (data-plane TCP connections are rebuilt; no restart) |
 | Leave DURING a run | Logs `[LEAVE] Rank r disconnected (during a RUN)` and immediately `[ABORT]`s: sends `C_ABORT`, **cancels every blocked recv** | That RUN prints `[ABORT] this RUN ended early: ...`, then the worker goes back to waiting for the next RUN (the process stays alive) |
-| A rank stalls | **Stall watchdog**: no progress at all for `MINIMPI_RUN_TIMEOUT` (default 600 s) aborts the RUN and returns to the menu | Same as above |
+| A rank stalls (process alive but doing nothing) | **Stall watchdog**: no progress at all for `MINIMPI_RUN_TIMEOUT` (default 600 s) aborts the RUN, NAMES the rank that stopped heartbeating and DROPS it (`[ROSTER] excluding Rank r`); the class continues with the rest | That RUN aborts; the dropped student's worker sees its control link close and exits — restart the worker to rejoin |
+| A student machine vanishes (lid closed / cable pulled, no FIN) | **TCP keepalive** on the control AND data sockets (8 s idle + 3 probes 2 s apart) turns it into an ordinary disconnect, so the normal `[LEAVE]` path runs | Same (the rank is removed normally) |
 | Teacher disappears mid-run | — | The worker's control link drops → blocked recv is cancelled → it prints why and exits; it never hangs forever |
 | Abort while the teacher is paused at `[ENTER]` | The pause is cancelled (`(pause cancelled: this RUN was aborted)`) so it can never swallow the next menu command | That RUN aborts; the menu stays usable |
 
@@ -343,7 +344,25 @@ Key points:
   another worker's connection. `PeerTransport.reset_peers()` handles exactly
   that; it is the easiest thing to get wrong.
 - All of this is covered by an automated test:
-  `python3 tests/test_robustness.py` (25 checks, real processes).
+  `python3 tests/test_robustness.py` (**54 checks, real processes**).
+
+#### Flow-by-flow audit: what happens if a worker leaves at that moment
+
+| When the worker leaves | Behaviour | Can the class stall? |
+| --- | --- | --- |
+| Right after connecting, before reading its welcome ("clicked join, closed the lid") | The teacher identifies the worker by CONNECTION (not by rank), logs `[LEAVE]` and compacts ranks | No |
+| While waiting for the class to fill up (`--demo/--benchmark` need the full size) | Logs `[ROSTER] a rank left before the world was ready` and, every 20 s, which ranks are still missing | No (a demo still waits for the full size — that is the contract) |
+| During the Network Check | Detects the membership change, stops the check early, marks unknown edges `?` and says "N edges unknown" | No |
+| While idle (menu at `Select:`) | `[LEAVE]` + rank compaction + re-welcome | No |
+| During a RUN (blocked inside a collective) | Immediate `[ABORT]`: `C_ABORT` to the survivors and every pending receive is cancelled | No |
+| While the teacher is paused at `[ENTER]` | Same abort, and the pause is cancelled (`pause cancelled`) so it cannot swallow the next menu command | No |
+| Two students leave almost simultaneously | Both departures are seen (looked up by connection, so a compacted rank is still recognised) and the roster stays consistent | No |
+| The process freezes (`SIGSTOP`/sleeping, no FIN) | Heartbeats stop → watchdog aborts, names and drops it | No |
+| The machine vanishes (no FIN at all) | TCP keepalive → treated as a normal disconnect | No |
+| During the Performance Benchmark | The whole session is cancelled at once (no table full of 0.00/n/a rows) and the teacher returns to its menu | No |
+| Everybody leaves (world size becomes 1) | The menu says a RUN would be Rank 0 alone; such a RUN still completes | No |
+| Somebody tries to JOIN during a RUN | Refused explicitly (`code=busy`); the worker no longer reports `VERSION MISMATCH` but `[JOIN REFUSED]` and **retries every 3 s (up to 60 times)**, joining as a latecomer as soon as the run ends | No |
+| The world size changes (a class of 3) | In the benchmark, RD (power-of-two only) and Ring cases whose payload is not divisible by 3 print `[skip]` and show `n/a` instead of recording meaningless numbers | No |
 
 **Concurrency correctness (found the hard way, now fixed)**: joins, leaves and
 runs are handled by different threads, so every control message to a worker is
@@ -426,7 +445,8 @@ bytes (benchmarks never pollute data with JSON/base64). Control plane:
 newline-delimited JSON.
 
 Control messages (classroom infrastructure, not MPI API): `join / welcome /
-run / round_done / done / check / check_report / abort / shutdown`. `welcome`
+run / round_done / done / check / check_report / heartbeat / abort /
+shutdown`. `welcome`
 is re-sent after ANY membership change to update rank/size/peers; `abort` is
 only used when a run can no longer finish (a rank left / the watchdog fired).
 
@@ -447,6 +467,10 @@ only used when a run can no longer finish (a rank left / the watchdog fired).
   (simulate a slow terminal), `MINIMPI_LOCAL_WORK_DELAY` (simulate a slow
   rank's local work), `MINIMPI_SHOW_WORK` (debug) are **test-only /
   automation hooks** — classroom interaction never uses them.
+- Heartbeats: workers send one `heartbeat` control message every
+  `HEARTBEAT_S = 2.0 s`; the teacher treats a rank as "no longer talking" after
+  `HEARTBEAT_STALE_S = 6.0 s` of silence. A heartbeat proves LIVENESS, never
+  progress — otherwise the stall watchdog could never fire for a frozen rank.
 - Classroom robustness knob: `MINIMPI_RUN_TIMEOUT` (default 600 s) is a
   **stall watchdog** — it counts how long *nothing at all* was reported, not
   total wall time, so a long explanation between rounds is fine but a wedged
