@@ -248,9 +248,16 @@ python3 scripts/check_env.py          # environment self-check (zero deps)
 
 # Classroom: open a teacher on one machine (interactive)
 python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
-#   Every join is logged, e.g.
-#   [JOIN] 192.168.1.45:51234 -> Rank 1  (data plane ...)  [2/4 ranks ready]
-#   failures print REJECTED (version mismatch / world full); leaving prints [LEAVE] Rank x
+#   --size is the CAPACITY (how many ranks may join), not "how many must".
+#   An interactive lesson starts once >= 2 ranks are here and nobody is still
+#   joining (3 s of quiet); late students can still join, and a student who
+#   leaves never wedges the class.
+#   Joins / leaves / rank changes are logged, e.g.
+#   [JOIN] 192.168.1.45:51234 -> Rank 1  (data plane ...)  [2/4 ranks ready - capacity]
+#   [LEAVE] Rank 2 disconnected
+#   [ROSTER] rank compaction: 3 -> 2
+#   [ROSTER] Rank 2 re-welcomed (world size is now 2)
+#   failures print REJECTED (version mismatch / world full / run in progress)
 # One-click student launcher (recommended): double-click
 #   scripts/start_worker_mac.command  (macOS)
 #   scripts/start_worker_windows.bat  (Windows)
@@ -292,7 +299,7 @@ vector. Barrier sync messages never appear in the communication view.
 The teacher prints on startup:
 
 ```text
-Version: 2.1.0 (protocol 1)
+Version: 2.2.0 (protocol 2)
 ```
 
 A worker also prints its own version and reports `version/protocol` when it
@@ -308,6 +315,40 @@ worker : [VERSION MISMATCH] ... Please update this student copy (git pull /
 **Fix**: `git pull` (or re-download `classroom_minimpi`) on the student
 machine, then double-click `scripts/start_worker_*` again. Nothing to change
 on the teacher side.
+
+### Dynamic membership and robustness (what a real classroom needs)
+
+A lesson is not a batch job: students arrive late, close the laptop mid-run, or
+restart the worker. MiniMPI therefore separates **capacity** (the `--size` the
+teacher opened) from **active size** (rank 0 + the workers that are here now):
+
+| Event | Teacher behaviour | What students see |
+| --- | --- | --- |
+| Join (including late) | Assigns the **lowest free rank**, world size +1, logs `[JOIN]`; re-sends `C_WELCOME` to the others with the new peers | The newcomer prints `[ROSTER] You are now Rank r / n` |
+| Leave while idle | Logs `[LEAVE]`; **compacts ranks to a contiguous 1..N-1**, logs `[ROSTER] rank compaction` and re-welcomes every worker | Remaining students see their rank change (data-plane TCP connections are rebuilt; no restart) |
+| Leave DURING a run | Logs `[LEAVE] Rank r disconnected (during a RUN)` and immediately `[ABORT]`s: sends `C_ABORT`, **cancels every blocked recv** | That RUN prints `[ABORT] this RUN ended early: ...`, then the worker goes back to waiting for the next RUN (the process stays alive) |
+| A rank stalls | **Stall watchdog**: no progress at all for `MINIMPI_RUN_TIMEOUT` (default 600 s) aborts the RUN and returns to the menu | Same as above |
+| Teacher disappears mid-run | — | The worker's control link drops → blocked recv is cancelled → it prints why and exits; it never hangs forever |
+| Abort while the teacher is paused at `[ENTER]` | The pause is cancelled (`(pause cancelled: this RUN was aborted)`) so it can never swallow the next menu command | That RUN aborts; the menu stays usable |
+
+Key points:
+
+- Every RUN uses the **current** active size (`Running...  (World Size n)`), so
+  "3 students" really runs as 3 ranks.
+- The collective algorithms are **untouched**: aborting happens in the
+  transport (cancelling blocked receives); algorithms still fail with an
+  exception, and the teaching semantics (rounds / views / timing) stay frozen.
+- After any membership change the data-plane peer table is rebuilt — outbound
+  sockets are cached per rank, so a compacted rank would otherwise reuse
+  another worker's connection. `PeerTransport.reset_peers()` handles exactly
+  that; it is the easiest thing to get wrong.
+- All of this is covered by an automated test:
+  `python3 tests/test_robustness.py` (20 checks, real processes).
+
+```bash
+python3 tests/test_robustness.py        # join/leave/abort/watchdog acceptance
+MINIMPI_RUN_TIMEOUT=120 python3 teacher.py --size 8   # trip the watchdog sooner
+```
 
 ## 4. Classroom demo main line
 
@@ -372,6 +413,11 @@ carries `src,dst,tag,fmt,plen,rnd,phase,algo`; the payload is always raw
 bytes (benchmarks never pollute data with JSON/base64). Control plane:
 newline-delimited JSON.
 
+Control messages (classroom infrastructure, not MPI API): `join / welcome /
+run / round_done / done / check / check_report / abort / shutdown`. `welcome`
+is re-sent after ANY membership change to update rank/size/peers; `abort` is
+only used when a run can no longer finish (a rank left / the watchdog fired).
+
 ## 6. Limits and boundaries (the teaching boundary this README declares)
 
 - **Tree Reduce / Recursive Doubling AllReduce need a power-of-two world
@@ -389,6 +435,17 @@ newline-delimited JSON.
   (simulate a slow terminal), `MINIMPI_LOCAL_WORK_DELAY` (simulate a slow
   rank's local work), `MINIMPI_SHOW_WORK` (debug) are **test-only /
   automation hooks** — classroom interaction never uses them.
+- Classroom robustness knob: `MINIMPI_RUN_TIMEOUT` (default 600 s) is a
+  **stall watchdog** — it counts how long *nothing at all* was reported, not
+  total wall time, so a long explanation between rounds is fine but a wedged
+  rank is aborted. If a round's discussion can exceed it, raise it
+  (`MINIMPI_RUN_TIMEOUT=1800`).
+- Honest boundary for dynamic membership: world size only changes BETWEEN
+  runs. A join that lands while a run is in flight is refused ("a collective
+  run is in progress") rather than shrinking/growing a live collective, and a
+  run that loses a rank is aborted, not continued with fewer ranks — real MPI
+  does not allow that either; the point here is that the classroom never
+  wedges.
 - Dependencies: **Python ≥ 3.8, standard library only**
   (socket/threading/struct/json/time…). macOS/Windows/Linux all work.
 

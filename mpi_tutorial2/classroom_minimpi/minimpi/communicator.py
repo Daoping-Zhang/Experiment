@@ -82,6 +82,7 @@ class Communicator:
         self.events = events  # metrics.EventLog or None
         self.algo_hook = None  # minimpi.synchronization hook (round sync)
         self.last_arrival_ns = None  # arrival of the most recent recv (own clock)
+        self.default_timeout = None  # seconds; set by the runtime on abort
 
     # ------------------------------------------------------------------ info
     def Get_rank(self):
@@ -108,10 +109,22 @@ class Communicator:
     def recv(self, source=ANY_SOURCE, tag=ANY_TAG, timeout=None, fmt=None,
              algo="", phase="", rnd=0, kind=P.KIND_ALGO):
         """Blocking receive matched by (source, tag). Returns the decoded
-        value. A CommunicationEvent is recorded on success."""
+        value. A CommunicationEvent is recorded on success.
+
+        `timeout=None` falls back to `self.default_timeout` when the runtime
+        has set one (classroom robustness: a run whose membership broke or
+        was aborted must not block forever).
+        """
+        if timeout is None:
+            timeout = getattr(self, "default_timeout", None)
         t0 = now_ns()
         result = self.transport.recv_match(source=source, tag=tag, timeout=timeout)
         if result is None:
+            if getattr(self.transport, "aborted", False):
+                raise RuntimeError(
+                    "Run aborted: pending receive (source=%s tag=%s) was "
+                    "cancelled — a rank left or the teacher aborted this RUN"
+                    % (source, tag))
             raise TimeoutError("Receive timeout: source=%s tag=%s" % (source, tag))
         header, payload = result
         t1 = now_ns()

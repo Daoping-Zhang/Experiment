@@ -85,6 +85,54 @@ class MiniRuntime:
                                  size if size is not None else 1, events=self.events)
         self.done_ok = False
         self.done_error = None
+        # classroom robustness state
+        self.aborted = False
+        self.abort_reason = ""
+
+    # ------------------------------------------------------- roster / abort
+    def apply_roster(self, rank, size, peers):
+        """Teacher re-assigned our rank (someone joined/left): adopt it before
+        the next RUN. Ranks stay contiguous 0..size-1."""
+        self.rank = int(rank)
+        self.size = int(size)
+        self.comm.rank = self.rank
+        self.comm.size = self.size
+        table = {int(k): (v["host"], int(v["port"]))
+                 for k, v in peers.items() if int(k) != self.rank}
+        self.transport.reset_peers(self.rank, table)
+        w = getattr(self, "comm_world", None)
+        if w is not None:
+            w.rank = self.rank
+            w.size = self.size
+        try:
+            from . import mpi as M
+            if M.COMM_WORLD is not None:
+                M.COMM_WORLD.rank = self.rank
+                M.COMM_WORLD.size = self.size
+        except Exception:  # noqa: BLE001
+            pass
+
+    def abort_run(self, reason=""):
+        """A rank left / the teacher cancelled this RUN: stop blocking forever.
+
+        We do NOT touch the collective algorithms — every pending receive
+        (including one already parked) is cancelled at the TRANSPORT, so the
+        blocked rank raises immediately and the run ends with an error instead
+        of hanging. The communicator timeout is the belt-and-braces path for
+        receives posted after the abort."""
+        self.aborted = True
+        self.abort_reason = reason or "aborted by teacher"
+        self.comm.default_timeout = 2.0
+        self.transport.abort_pending(True)
+        w = getattr(self, "comm_world", None)
+        if w is not None:
+            w._rt.comm.default_timeout = 2.0
+
+    def clear_abort(self):
+        self.aborted = False
+        self.abort_reason = ""
+        self.comm.default_timeout = None
+        self.transport.abort_pending(False)
 
     # ------------------------------------------------------------------ join
     def register_with_teacher(self, server, name=None):

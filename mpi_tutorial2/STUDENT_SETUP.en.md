@@ -56,9 +56,15 @@ Everything should pass. If not, send the output to the instructor.
 python3 teacher.py --size 4 --host 0.0.0.0 --port 9000 --advertise 192.168.1.23
 ```
 
-3. You should see `Version: 2.1.0 (protocol 1)` and
-   `Waiting for ranks (1/4)...`; once everyone joined:
-   `MPI World Ready: 4 / 4 ranks`.
+3. You should see `Version: 2.2.0 (protocol 2)` and
+   `Waiting for ranks (n joined, capacity 4)...`; the teacher can start once
+   a couple of students are in and nobody is still joining, and
+   `MPI World Ready: n ranks (n-1 student workers)` names the **actual**
+   number of participants.
+   `--size 4` is a capacity, not a quota: a late student can still join
+   (the teacher logs `[JOIN] ... -> Rank r`), and if somebody leaves the
+   teacher logs `[LEAVE]` and renumbers the ranks (`[ROSTER] rank
+   compaction`) — the class never wedges because of it.
 
 ### Student side (simplest: double-click the launcher)
 
@@ -72,7 +78,7 @@ At the prompt `Teacher IP:Port [192.168.1.100:9000]:` type the teacher's IP
 (an IP without a port gets `:9000` appended automatically). On success:
 
 ```text
-MiniMPI Worker version 2.1.0 (protocol 1)
+MiniMPI Worker version 2.2.0 (protocol 2)
 MiniMPI Worker
 Rank: 2 / 4
 
@@ -110,7 +116,7 @@ refused:
 
 ```text
 [VERSION MISMATCH] version mismatch: worker=0.0.0 (protocol 1),
-teacher=2.1.0 (protocol 1) — please UPDATE the student copy ...
+teacher=2.2.0 (protocol 2) — please UPDATE the student copy ...
 
 Please update this student copy (git pull / re-download) and start the worker again.
 ```

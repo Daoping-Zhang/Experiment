@@ -61,6 +61,8 @@ Base commit:
 
 ## What changed (final behavior refinement)
 
+* MiniMPI version is 2.2.0 / protocol 2 (was 2.1.0 / protocol 1): a worker
+  whose copy differs is refused at join with an explicit update instruction.
 * recursive_doubling_allreduce.py: Naive Tree reduce+broadcast was replaced
   by TRUE Recursive Doubling AllReduce — P=4 -> exactly 2 rounds, round 1
   pairs (0,1)(2,3), round 2 pairs (0,2)(1,3); every rank exchanges (sends
@@ -78,12 +80,46 @@ Base commit:
   subtracted across clocks (different clock domains and baselines).
 * Performance Benchmark session: each rank enters ONE integer at benchmark
   setup; every case then reuses it (no per-case prompts, no ENTER); sizes
-  are 16 B / 1 KB / 16 KB / 256 KB / 4 MB / 16 MB (all divisible by the
+  are 16 B / 1 KB / 16 KB / 256 KB / 4 MB (all divisible by the
   world size, shown as real Data Sizes, never a zero-element placeholder); each
   algorithm x size runs 3 times and the summary is the MEDIAN; a raw per-run log is printed for auditing.
 * Data-plane connections are warmed once (teacher + workers) after the world
   is ready, before any RUN — persistent sockets reused by the collectives,
   with no algorithm event / no teaching timing / no benchmark timing.
+
+## Classroom membership robustness (this round)
+
+A live lesson is not a batch job: students join late, close the laptop in the
+middle of a collective, or restart. `--size` is now a CAPACITY; the ACTIVE
+world size is rank 0 + the workers that are here now, and it may differ.
+
+* Join (including a latecomer): lowest free rank, world size +1, `[JOIN]`
+  line, and every other worker is re-welcomed (`C_WELCOME`) with the new
+  rank/size/peer table.
+* Leave while idle: `[LEAVE]`, worker ranks are COMPACTED to a contiguous
+  1..N-1 (`[ROSTER] rank compaction: 3 -> 2`), each remaining worker is
+  re-welcomed, and the next RUN uses the reduced world size.
+* Leave DURING a run: `[LEAVE] Rank r disconnected  (during a RUN)`, then an
+  immediate `[ABORT]`: `C_ABORT` is sent to the survivors and rank 0's own
+  pending receive is cancelled. Every rank unwinds with an error, the run
+  ends, and the teacher returns to its menu with the compacted roster.
+* Stall watchdog: a RUN with no progress at all for `MINIMPI_RUN_TIMEOUT`
+  (default 600 s, measured as a STALL, not total time) is aborted instead of
+  hanging. Verified by running a rank that never reaches the barrier.
+* Worker side: a broken control link (teacher gone) cancels the worker's
+  blocked receive, so the worker reports why and exits instead of hanging.
+* The teacher's `[ENTER]` pause is cancellable: an abort while the teacher is
+  explaining can no longer leave a thread that swallows the next menu command
+  (a plain input() there was exactly how a class ended up "unable to run").
+* Collectives were NOT touched: aborting is transport-level
+  (`PeerTransport.abort_pending()`, `Communicator.default_timeout`), and
+  `PeerTransport.reset_peers()` drops per-rank socket caches + stale queued
+  frames when a roster changes, so a compacted rank never reuses another
+  worker's connection.
+* New automated suite `tests/test_robustness.py`: 20 checks over real
+  teacher/worker processes — leave while idle, late join, leave during a run
+  (no hang, menu still usable, next RUN correct), watchdog, teacher
+  disappears. Every scenario has a hard deadline, so a hang is a FAIL.
 
 ## Teacher View
 
@@ -115,7 +151,7 @@ Round/Collective timing.
 
 ## Performance Benchmark
 
-3 algorithms (Naive / Recursive Doubling / Ring) x 6 sizes x 3 runs,
+3 algorithms (Naive / Recursive Doubling / Ring) x 5 sizes x 3 runs,
 median aggregation; summary table in teacher output; raw lines for audit.
 CLI: teacher --benchmark (workers headless) runs the same session.
 
@@ -125,7 +161,8 @@ suites run by this generator: test_smoke, test_round_behavior (A-F),
 test_teaching_semantics (G-K), test_timing_worker (L-S),
 test_final_behavior (T-Z: RD topology/correctness, LOCAL TIMELINE semantics,
 synchronization window, benchmark one-input/no-zero-data-size/median-summary),
-verify.py.
+test_version_guard (join-time version refusal), test_robustness (join / leave /
+abort / watchdog / teacher-gone, real processes), verify.py.
 
 ## Remaining Issues
 
@@ -137,6 +174,14 @@ verify.py.
   median aggregation follow the spec (a future production MPI demo provides
   absolute numbers).
 * Barrier is a star-shaped AllReduce-of-1 teaching implementation.
+* Membership boundary (honest): the world size only changes BETWEEN runs. A
+  join that lands while a run is in flight is refused ("a collective run is
+  in progress") instead of changing a live collective, and a run that loses a
+  rank is aborted rather than continued with fewer ranks — real MPI does not
+  allow that either; the goal is that the classroom never wedges.
+* `MINIMPI_RUN_TIMEOUT` counts a STALL (nothing reported by any rank), so a
+  teaching pause longer than the timeout would still abort the run; raise the
+  variable for very long in-class discussions.
 """
 
 WORKER_FLOW_TEMPLATE = """# WORKER_FLOW.md — how worker.py reads
@@ -508,6 +553,10 @@ def main():
          420),
         ("test_timing_worker", [PY, "tests/test_timing_worker.py"], 600),
         ("test_final_behavior", [PY, "tests/test_final_behavior.py"], 900),
+        ("test_version_guard", [PY, "tests/test_version_guard.py"], 300),
+        # membership robustness: late join / leave while idle / leave DURING a
+        # run / stall watchdog / teacher disappears (real processes)
+        ("test_robustness", [PY, "tests/test_robustness.py"], 900),
         ("verify", [PY, "scripts/verify.py"], 900),
     ]
     combined = []

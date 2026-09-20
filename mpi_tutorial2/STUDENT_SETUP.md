@@ -53,8 +53,12 @@ python  scripts/check_env.py   # Windows
 python3 teacher.py --size 4 --host 0.0.0.0 --port 9000 --advertise 192.168.1.23
 ```
 
-3. 看到 `Version: 2.1.0 (protocol 1)` 与 `Waiting for ranks (1/4)...`；
-   学生到齐后变成 `MPI World Ready: 4 / 4 ranks`。
+3. 看到 `Version: 2.2.0 (protocol 2)` 与 `Waiting for ranks (n joined, capacity 4)...`；
+   人来得差不多（≥2 人且不再有人加入）老师就可以开始，
+   `MPI World Ready: n ranks (n-1 student workers)` 就是**现在实际参加的人数**。
+   `--size 4` 是容量上限：迟到的同学之后仍可加入（会打印 `[JOIN] ... -> Rank r`），
+   中途退出的同学老师端会打印 `[LEAVE]` 并把 rank 重新排好（`[ROSTER] rank compaction`），
+   课堂不会因此卡住。
 
 ### 学生端（最简：双击启动脚本）
 
@@ -67,7 +71,7 @@ Windows : 双击 scripts/start_worker_windows.bat
 `:9000`）。成功会看到：
 
 ```text
-MiniMPI Worker version 2.1.0 (protocol 1)
+MiniMPI Worker version 2.2.0 (protocol 2)
 MiniMPI Worker
 Rank: 2 / 4
 
@@ -104,7 +108,7 @@ teacher 与 worker 必须同版本，否则 join 会被拒绝：
 
 ```text
 [VERSION MISMATCH] version mismatch: worker=0.0.0 (protocol 1),
-teacher=2.1.0 (protocol 1) — please UPDATE the student copy ...
+teacher=2.2.0 (protocol 2) — please UPDATE the student copy ...
 
 Please update this student copy (git pull / re-download) and start the worker again.
 ```

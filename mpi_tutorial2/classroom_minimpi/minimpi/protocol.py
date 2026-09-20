@@ -26,8 +26,8 @@ ANY_TAG = -1
 # A worker whose version differs is rejected at join with a clear message
 # telling the student to update the copy (git pull) and restart.
 # ---------------------------------------------------------------------------
-MINIMPI_VERSION = "2.1.0"
-PROTOCOL_VERSION = 1
+MINIMPI_VERSION = "2.2.0"
+PROTOCOL_VERSION = 2
 
 # tag meanings inside the MiniMPI DATA plane (all via comm.send/comm.recv):
 #   ALGO_TAG_BASE   : upper bound of the algorithm tag region. Every collective
@@ -76,6 +76,7 @@ C_ROUND_DONE = "round_done"     # worker -> teacher: finished logical round r
 C_RELEASE = "release"           # teacher -> worker: teaching-mode round release
 C_DONE = "collective_done"      # worker -> teacher: algorithm finished (+ value)
 C_SUMMARY = "summary"           # teacher -> worker: benchmark summary (display)
+C_ABORT = "abort"                # teacher -> worker: cancel current RUN
 C_SHUTDOWN = "shutdown"
 C_ERROR = "error"
 

@@ -89,6 +89,15 @@ class ClassroomWorker:
         spec = self._q.get()
         return spec
 
+    def apply_roster(self, rank, size, peers):
+        """Adopt a new rank/size/peers from the teacher (between RUNs)."""
+        if self._rt is not None:
+            self._rt.apply_roster(rank, size, peers)
+
+    def clear_abort(self):
+        if self._rt is not None:
+            self._rt.clear_abort()
+
     def benchmark_value(self):
         """Value typed once at Performance Benchmark setup; None outside a
         benchmark session."""
@@ -117,18 +126,36 @@ class ClassroomWorker:
     # ------------------------------------------------------------- control
     def _read_loop(self):
         rt = self._rt
+        why = "teacher closed the control connection"
         try:
             while True:
                 m = rt.control.recv()
                 t = m.get("t")
                 if t == P.C_RUN:
                     self._q.put(RunSpec(params=m["params"]))
+                elif t == P.C_WELCOME:
+                    # teacher re-assigned our rank (someone joined/left)
+                    self._q.put(RunSpec(params={"kind": "roster",
+                                                "rank": m.get("rank"),
+                                                "size": m.get("size"),
+                                                "peers": m.get("peers", {})}))
+                elif t == P.C_ABORT:
+                    # a rank left / teacher cancelled: unblock immediately
+                    if self._rt is not None:
+                        self._rt.abort_run(m.get("why", ""))
+                    self._q.put(RunSpec(params={"kind": "abort",
+                                                "why": m.get("why", "")}))
                 elif t == P.C_CHECK:
                     self._answer_check(m)
                 elif t == P.C_SHUTDOWN:
+                    why = "session ended by the teacher"
                     break
         except (ConnectionError, OSError):
-            pass
+            why = "teacher control connection closed"
+        # Never leave the main thread blocked inside a collective waiting for
+        # a rank that can no longer answer.
+        if self._rt is not None:
+            self._rt.abort_run(why)
         self._q.put(None)               # shutdown sentinel for the main loop
         if self._reader is not None:
             pass

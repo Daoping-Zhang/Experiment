@@ -1,13 +1,22 @@
 """_proc.py — subprocess helpers shared by local_demo.py / verify.py.
 
-Spawns the real teacher.py and worker.py processes on 127.0.0.1, waits for
-the teacher to exit, and cleans every child up on timeout.
+Spawns the real teacher.py and worker.py processes on 127.0.0.1, waits for the
+teacher to exit, and cleans every child up on timeout.
+
+Two things a classroom harness must get right (a lesson is not a batch job):
+
+  * never start a worker before the teacher's control socket LISTENS — a
+    worker that arrives too early dies with "connection refused" and the
+    teacher then waits for a rank that can never arrive;
+  * always DRAIN every child's stdout — a full 64 KB pipe blocks a worker in
+    the middle of a collective.
 """
 import os
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -29,37 +38,69 @@ class Runner:
         self.timeout = timeout
         self.port = free_port()
         self.children = []
+        self._buf = {}          # Popen -> [lines] (only when pumped)
 
-    def _spawn(self, args, tag):
+    def _spawn(self, args, tag, pump=False):
+        """`pump=False` keeps the plain PIPE that callers may read with
+        communicate(); `pump=True` drains the pipe in a thread so long
+        classroom logs can never block a child."""
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         p = subprocess.Popen(args, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True, env=env)
+        if pump:
+            buf = []
+            self._buf[p] = buf
+            threading.Thread(target=self._pump, args=(p, buf),
+                             daemon=True).start()
         self.children.append(p)
         return p
 
-    def teacher(self, extra):
+    @staticmethod
+    def _pump(p, buf):
+        try:
+            for line in p.stdout:
+                buf.append(line)
+        except (ValueError, OSError):
+            pass
+
+    def log_of(self, p):
+        return "".join(self._buf.get(p, []))
+
+    def teacher(self, extra, pump=False):
         args = [PY, os.path.join(ROOT, "teacher.py"),
                 "--size", str(self.size), "--host", "127.0.0.1",
                 "--port", str(self.port), "--advertise", "127.0.0.1",
                 "--auto"] + extra
-        return self._spawn(args, "teacher")
+        return self._spawn(args, "teacher", pump=pump)
 
-    def workers(self, names=None):
+    def wait_listen(self, t, timeout=40):
+        """Wait until the teacher really accepts joins (not merely 'started').
+        Requires a pumped teacher."""
+        needle = "Coordinator: 127.0.0.1:%d" % self.port
+        end = time.time() + timeout
+        while time.time() < end:
+            if needle in self.log_of(t):
+                return True
+            if t.poll() is not None:
+                return False
+            time.sleep(0.05)
+        return False
+
+    def workers(self, names=None, pump=False):
         ps = []
         for i in range(1, self.size):
             args = [PY, os.path.join(ROOT, "worker.py"),
                     "--server", "127.0.0.1:%d" % self.port]
-            ps.append(self._spawn(args, "worker%d" % i))
+            ps.append(self._spawn(args, "worker%d" % i, pump=pump))
         return ps
 
     def run_demo(self, extra, expect_exit=True):
         """Start teacher + (size-1) workers; return (teacher_log, ok, timed_out)."""
-        t = self.teacher(extra)
-        time.sleep(2.0)          # let the teacher listen and print the banner
-        self.workers()
+        t = self.teacher(extra, pump=True)
+        self.wait_listen(t)
+        self.workers(pump=True)
 
-        log = []
         deadline = time.time() + self.timeout
         while time.time() < deadline:
             if t.poll() is not None:
@@ -68,9 +109,7 @@ class Runner:
         timed_out = t.poll() is None
         if timed_out:
             self.kill()
-        out, _ = t.communicate(timeout=5) if not timed_out else (None, None)
-        log.append(out or "")
-        return "\n".join(log), not timed_out, timed_out
+        return self.log_of(t), not timed_out, timed_out
 
     def kill(self):
         for p in self.children:

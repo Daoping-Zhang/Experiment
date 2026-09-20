@@ -171,7 +171,7 @@ classroom_minimpi/
 ├── scripts/
 │   ├── check_env.py      # Python/环境检查
 │   ├── local_demo.py     # 单机跑 teacher+workers
-│   ├── local_benchmark.py# 单机跑完整 Performance Benchmark（输入 --size rank 数；看 loopback baseline）     # 单机跑 teacher+workers
+│   ├── local_benchmark.py# 单机跑完整 Performance Benchmark（输入 --size rank 数；看 loopback baseline）
 │   ├── verify.py         # 自动验收（含 timeout，hang 即 FAIL）
 │   ├── run_teaching_review.py  # 一键生成 Teaching View 审核包（tar.gz）
 │   └── _proc.py          # 子进程助手
@@ -185,9 +185,15 @@ python3 scripts/check_env.py          # 环境自检（零第三方依赖）
 
 # 课堂：一台机器上开 teacher（交互式）
 python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
-#   每个学生加入都会打印：
-#   [JOIN] 192.168.1.45:51234 -> Rank 1  (data plane ...)  [2/4 ranks ready]
-#   失败会打印 REJECTED 原因（版本不一致 / world 已满）；掉线打印 [LEAVE] Rank x
+#   --size 是**容量**（最多几个 rank），不是"必须到齐几个"。
+#   交互课堂只要 ≥2 个 rank 且不再有人加入（静默 3 秒）就开始上课；
+#   迟到的同学随时还能加入，中途退出的同学也不会让课堂卡住。
+#   每个学生加入/退出/重排都会打印：
+#   [JOIN] 192.168.1.45:51234 -> Rank 1  (data plane ...)  [2/4 ranks ready - capacity]
+#   [LEAVE] Rank 2 disconnected
+#   [ROSTER] rank compaction: 3 -> 2
+#   [ROSTER] Rank 2 re-welcomed (world size is now 2)
+#   失败会打印 REJECTED 原因（版本不一致 / world 已满 / 正在跑）
 # 学生一键启动（推荐）：Mac 双击 scripts/start_worker_mac.command；
 #   Windows 双击 scripts/start_worker_windows.bat —— 输入老师 IP:Port 即连接。
 # 手动方式（等价；每个 worker 的 MPI 身份只有 Rank，每次 RUN 各自输入一个整数）：
@@ -224,7 +230,7 @@ python3 scripts/run_teaching_review.py   # 一键生成 Teaching View 审核包
 Teacher 启动会打印：
 
 ```text
-Version: 2.1.0 (protocol 1)
+Version: 2.2.0 (protocol 2)
 ```
 
 Worker 启动也会打印自己的版本，并在 join 时把 `version/protocol` 一起上报。若与学生机上的副本
@@ -232,13 +238,41 @@ Worker 启动也会打印自己的版本，并在 join 时把 `version/protocol`
 
 ```text
 teacher: [VERSION] rejected a worker: version mismatch: worker=0.0.0 (protocol 1),
-         teacher=2.1.0 (protocol 1) — please UPDATE the student copy ...
+         teacher=2.2.0 (protocol 2) — please UPDATE the student copy ...
 worker : [VERSION MISMATCH] ... Please update this student copy (git pull /
          re-download) and start the worker again.
 ```
 
 **处理方式**：在学生机 `git pull`（或重新下载 `classroom_minimpi`）后，重新双击
 `scripts/start_worker_*` 即可；teacher 侧不需要改任何参数。
+
+### 动态成员与鲁棒性（真实课堂的关键）
+
+课堂不是批处理：有人迟到、有人合上笔记本、有人中途重启。MiniMPI 的规则是
+**容量（capacity）≠ 当前规模（active size）**：
+
+| 事件 | Teacher 行为 | 学生看到 |
+| --- | --- | --- |
+| 加入（含迟到） | 分配**最小空闲 rank**，world size +1，打印 `[JOIN]`；给其它 rank 重发 `C_WELCOME` 更新 peers | 新同学打印 `[ROSTER] You are now Rank r / n` |
+| 空闲时退出 | 打印 `[LEAVE]`；**rank 压缩成连续的 1..N-1**，打印 `[ROSTER] rank compaction` 并重新 welcome 每个 rank | 剩余同学看到自己 rank 变了（数据面 TCP 连接会重建，不需要重启） |
+| 正在跑时退出 | 打印 `[LEAVE] Rank r disconnected (during a RUN)`，立刻 `[ABORT]`：给剩余 rank 发 `C_ABORT`，**取消所有正在阻塞的 recv** | 该 RUN 打印 `[ABORT] this RUN ended early: ...`，随后回到等待下一次 RUN（进程不退出） |
+| 某个 rank 卡死 | **停车看门狗**：超过 `MINIMPI_RUN_TIMEOUT`（默认 600 s，按"无任何进展"计）无进展就 abort 整个 RUN 并回到菜单 | 同上 |
+| 正在跑时 teacher 消失 | —— | worker 控制连接断开 → 取消阻塞 recv → 打印原因后正常退出，不会永久卡死 |
+| 讲课停在 `[ENTER]` 时发生 abort | 暂停会被取消（`(pause cancelled: this RUN was aborted)`），不会吞掉下一条菜单输入 | 该 RUN abort，菜单可继续用 |
+
+要点：
+
+- 每次 RUN 都用**当前**的 active size（`Running...  (World Size n)`），所以"3 个人就按 3 个 rank 跑"。
+- Collective 算法代码**没有被改**：abort 是在 transport 层取消阻塞的 recv（`transport.abort_pending()`），
+  算法照旧抛异常结束，教学语义（轮次/视图/timing）保持冻结。
+- 每次成员变化后数据面 peers 会重建（按 rank 缓存的出站连接必须失效），否则压缩后的
+  rank 会复用到别人的连接——这是最容易出错的地方，`PeerTransport.reset_peers()` 专门处理它。
+- 这些场景都有自动化验收：`python3 tests/test_robustness.py`（20 项检查，全部真实进程）。
+
+```bash
+python3 tests/test_robustness.py        # 加入/退出/中断/看门狗 鲁棒性验收
+MINIMPI_RUN_TIMEOUT=120 python3 teacher.py --size 8   # 想更快触发看门狗
+```
 
 ## 4. 课堂演示主线
 
@@ -291,6 +325,10 @@ teacher 打印 Start Barrier 块、ENTER 后开跑）。每轮固定结构：
 数据面帧：`[4B header_len][JSON header][raw payload]`。header 含
 `src,dst,tag,fmt,plen,rnd,phase,algo`；payload 始终 raw bytes（benchmark 不用 JSON/base64 污染数据）。控制面：逐行 JSON。
 
+控制面消息（课堂基础设施，不是 MPI API）：`join / welcome / run / round_done / done /
+check / check_report / abort / shutdown`。其中 `welcome` 会在**任何成员变化后重发**用于更新
+rank/size/peers；`abort` 只用于"这个 RUN 不可能完成了"（有人退出 / 看门狗）。
+
 ## 6. 限制与边界（README 声明的教学边界）
 
 - **Tree Reduce / Recursive Doubling AllReduce 需要 power-of-two world size**（代码会明确报错；RD 为 log2(P) 轮双向交换）。
@@ -298,6 +336,12 @@ teacher 打印 Start Barrier 块、ENTER 后开跑）。每轮固定结构：
 - payload `op` 默认 `sum`（int 向量逐元素和）；`raw` 大消息用 `xor`（大整数按位，纯 stdlib 也快）。
 - **这不是生产 MPI**：它只为教学复现"通信模型 / 热点 / 步数 / transfer time / effective bandwidth"，不要声称性能等同真实 MPI；校园网噪声大，benchmark 不设硬性 pass/fail 阈值。
 - 环境变量 `MINIMPI_TEACH_PAUSE`（auto 模式模拟 ENTER）、`MINIMPI_INPUT_DELAY`（模拟慢输入）、`MINIMPI_LOCAL_VIEW_DELAY`（模拟慢终端）、`MINIMPI_LOCAL_WORK_DELAY`（模拟慢 rank 本地工作）、`MINIMPI_SHOW_WORK`（debug）均为 **test-only / 自动化钩子**，课堂交互不使用它们。
+- 课堂鲁棒性相关：`MINIMPI_RUN_TIMEOUT`（默认 600 s）是**停车看门狗**——按"多久没有任何 rank 上报进展"计，
+  不是总时长；所以老师在每轮之间讲解很久没问题，但真要卡死会被 abort。若某轮讲解会超过这个时间，
+  把它调大（`MINIMPI_RUN_TIMEOUT=1800`）。
+- 动态成员的边界（诚实声明）：world size 变化只发生在 RUN 之间；**RUN 进行中有人加入会被拒绝**
+  （提示"a collective run is in progress"），不会让正在跑的 collective 中途换 size。中途退出的 RUN
+  会被 abort 而不是"缩容继续"——真实 MPI 同样不允许；这里只是让课堂不卡死。
 - 依赖：**Python ≥ 3.8，仅标准库**（socket/threading/struct/json/time…）。macOS/Windows/Linux 均可。
 
 ## 7. 术语对应

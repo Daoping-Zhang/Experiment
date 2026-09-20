@@ -35,6 +35,7 @@ class PeerTransport:
 
         self._inbox = []           # list of (header, payload)
         self._inbox_cv = threading.Condition()
+        self.aborted = False       # classroom: cancel pending blocking recvs
         self._out = {}             # rank -> socket
         self._out_lock = threading.Lock()
         self._closed = False
@@ -47,6 +48,26 @@ class PeerTransport:
     def set_peers(self, rank, peers):
         self.rank = rank
         self.peers = dict(peers)   # rank -> (host, port)
+
+    def reset_peers(self, rank, peers):
+        """Adopt a NEW roster (somebody joined / left and ranks moved).
+
+        Outbound sockets are cached per rank, so after a compaction rank 2
+        would otherwise reuse the connection that used to belong to another
+        worker. Queued inbound frames belong to the previous roster too (that
+        run is over), so the inbox is dropped as well.
+        """
+        with self._out_lock:
+            for conn in self._out.values():
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+            self._out.clear()
+        with self._inbox_cv:
+            self._inbox = []
+            self._inbox_cv.notify_all()
+        self.set_peers(rank, peers)
 
     def endpoint_str(self):
         return "%s:%d" % (self.host, self.port)
@@ -119,6 +140,19 @@ class PeerTransport:
             self._out[rank] = conn
             return conn
 
+    def abort_pending(self, flag=True):
+        """Classroom robustness: a RUN was cancelled (a rank left, watchdog).
+
+        Every blocking receive — INCLUDING one already parked in
+        recv_match() — returns None right away, so no rank can stay stuck in
+        a collective whose membership is gone. Cleared with flag=False before
+        the next RUN. Collective algorithms are untouched: their recv simply
+        raises, as it would after any transport failure.
+        """
+        with self._inbox_cv:
+            self.aborted = bool(flag)
+            self._inbox_cv.notify_all()
+
     # ------------------------------------------------------------------ recv
     def recv_match(self, source=P.ANY_SOURCE, tag=P.ANY_TAG, timeout=None):
         """Block until a frame whose header matches source/tag arrives.
@@ -129,13 +163,15 @@ class PeerTransport:
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._inbox_cv:
             while True:
+                if self.aborted:
+                    return None
                 for i, (header, payload) in enumerate(self._inbox):
                     if (source == P.ANY_SOURCE or header.get("src") == source) and \
                        (tag == P.ANY_TAG or header.get("tag") == tag):
                         del self._inbox[i]
                         return header, payload
                 if deadline is None:
-                    self._inbox_cv.wait()
+                    self._inbox_cv.wait(0.5)
                 else:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:

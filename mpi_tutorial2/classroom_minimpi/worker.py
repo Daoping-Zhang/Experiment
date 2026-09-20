@@ -73,6 +73,22 @@ def run_classroom(comm):
                 print("[shutdown]")
                 return
 
+            # Teacher control messages that are NOT a collective run: roster
+            # changes (somebody joined/left) and aborts.
+            if run.kind == "roster":
+                classroom.apply_roster(run.params.get("rank"),
+                                       run.params.get("size"),
+                                       run.params.get("peers", {}))
+                print("\n[ROSTER] You are now Rank %s / %s  (world updated)"
+                      % (run.params.get("rank"), run.params.get("size")))
+                continue
+
+            if run.kind == "abort":
+                print("\n[ABORT] %s"
+                      % (run.params.get("why") or "this RUN was cancelled"))
+                classroom.clear_abort()
+                continue
+
             # Performance Benchmark session setup: ONE input, all later cases
             # reuse that value — no per-case prompts, no zero Data Size.
             if run.kind == "benchmark_done":
@@ -123,11 +139,23 @@ def run_classroom(comm):
                     print("Local data ready.\n\nEntering MPI Barrier...\n"
                           "Waiting for all ranks...")
 
-            comm.Barrier()               # Start Barrier (both modes): the
+            try:
+                comm.Barrier()           # Start Barrier (both modes): the
                                          # collective only starts when every
                                          # rank is ready
-
-            result = run_one_collective(classroom, run, data)
+                result = run_one_collective(classroom, run, data)
+            except Exception as e:  # noqa: BLE001
+                # A RUN that could not start, or was aborted (a rank left,
+                # the teacher cancelled), must never kill the worker: report
+                # it and go back to waiting for the teacher's next command.
+                why = classroom.runtime.abort_reason or str(e)
+                print("\n[ABORT] this RUN ended early: %s" % why)
+                classroom.clear_abort()
+                continue
+            if classroom.runtime.aborted:
+                print("\n[ABORT] this RUN ended early: %s"
+                      % classroom.runtime.abort_reason)
+            classroom.clear_abort()
             if run.kind != "benchmark_case":
                 show_result(comm.Get_rank(), run, result)
     finally:
@@ -194,8 +222,14 @@ def run_one_collective(classroom, run, data):
                       "events": len(rt.events.events)})
         return result
     except Exception as e:  # noqa: BLE001
-        control.send({"t": P.C_DONE, "rank": rt.rank, "error": str(e),
-                      "final": None, "events": 0})
+        msg = str(e)
+        if getattr(rt, "aborted", False):
+            msg = "ABORTED: %s (%s)" % (rt.abort_reason, msg)
+        try:
+            control.send({"t": P.C_DONE, "rank": rt.rank, "error": msg,
+                          "final": None, "events": 0})
+        except OSError:
+            pass          # teacher is gone: the control reader handles that
         return None
 
 
