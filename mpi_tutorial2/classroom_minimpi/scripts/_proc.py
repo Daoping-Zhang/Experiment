@@ -32,6 +32,11 @@ def free_port():
     return port
 
 
+def _tail(text, lines=25):
+    parts = text.splitlines()
+    return "\n".join(parts[-lines:])
+
+
 class Runner:
     def __init__(self, size, timeout=90):
         self.size = size
@@ -107,9 +112,16 @@ class Runner:
                 break
             time.sleep(0.3)
         timed_out = t.poll() is None
+        log = self.log_of(t)
         if timed_out:
+            # a hang must be diagnosable from the artifact alone: keep every
+            # rank's last words before the children are killed
+            log += "\n----- TIMEOUT: last output of every rank -----\n"
+            log += _tail(log)
+            for i, w in enumerate(self.children[1:], start=1):
+                log += "\n----- worker %d -----\n%s" % (i, _tail(self.log_of(w)))
             self.kill()
-        return self.log_of(t), not timed_out, timed_out
+        return log, not timed_out, timed_out
 
     def kill(self):
         for p in self.children:

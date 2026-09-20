@@ -116,10 +116,28 @@ world size is rank 0 + the workers that are here now, and it may differ.
   `PeerTransport.reset_peers()` drops per-rank socket caches + stale queued
   frames when a roster changes, so a compacted rank never reuses another
   worker's connection.
-* New automated suite `tests/test_robustness.py`: 20 checks over real
+* Control-plane sends are SERIALIZED (`Coordinator.ctrl_lock`). Joins,
+  leaves and runs run on different threads; two concurrent welcome broadcasts
+  used to interleave on one socket and leave workers with DIFFERENT world
+  sizes, so the next collective paired ranks that disagreed and hung forever
+  (the observed "everyone typed their number and it still would not run",
+  reproduced twice in verify.py under load and diagnosed with all-thread
+  stack dumps). The same lock also makes "a RUN is in flight" atomic with
+  sending that RUN, so a join/leave can never rewrite the roster in between.
+  The coordinator's roster lock is an RLock: helpers re-read the roster while
+  a caller already holds it (a plain Lock self-deadlocked the joining thread).
+* New automated suite `tests/test_robustness.py`: 25 checks over real
   teacher/worker processes — leave while idle, late join, leave during a run
   (no hang, menu still usable, next RUN correct), watchdog, teacher
-  disappears. Every scenario has a hard deadline, so a hang is a FAIL.
+  disappears, and a BURST join (three students join at once; every rank must
+  end up with the same world size and the run must complete). Every scenario
+  has a hard deadline, so a hang is a FAIL.
+* Harness hardening: `scripts/_proc.py` waits until the teacher's control
+  socket really listens before starting workers (a worker started too early
+  died with "connection refused" and the teacher then waited forever), drains
+  every child's stdout (a full pipe blocks a worker mid-collective), and on a
+  timeout prints the last output of every rank so a hang is diagnosable from
+  the review package alone. verify.py prints the same dump on timeout.
 
 ## Teacher View
 
@@ -162,7 +180,7 @@ test_teaching_semantics (G-K), test_timing_worker (L-S),
 test_final_behavior (T-Z: RD topology/correctness, LOCAL TIMELINE semantics,
 synchronization window, benchmark one-input/no-zero-data-size/median-summary),
 test_version_guard (join-time version refusal), test_robustness (join / leave /
-abort / watchdog / teacher-gone, real processes), verify.py.
+abort / watchdog / teacher-gone / burst-join, real processes), verify.py.
 
 ## Remaining Issues
 

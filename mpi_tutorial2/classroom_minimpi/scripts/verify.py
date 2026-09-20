@@ -101,6 +101,8 @@ def e2e(name, demo, mode, expected_all, payload=None, size=4, expected_root=None
     log, ok, timed = r.run_demo(args)
     r.close()
     if timed:
+        # print what every rank was doing so a hang is diagnosable
+        print(log)
         check(name, False, "timeout")
         return
     if payload:

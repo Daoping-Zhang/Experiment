@@ -267,7 +267,14 @@ worker : [VERSION MISMATCH] ... Please update this student copy (git pull /
   算法照旧抛异常结束，教学语义（轮次/视图/timing）保持冻结。
 - 每次成员变化后数据面 peers 会重建（按 rank 缓存的出站连接必须失效），否则压缩后的
   rank 会复用到别人的连接——这是最容易出错的地方，`PeerTransport.reset_peers()` 专门处理它。
-- 这些场景都有自动化验收：`python3 tests/test_robustness.py`（20 项检查，全部真实进程）。
+- 这些场景都有自动化验收：`python3 tests/test_robustness.py`（25 项检查，全部真实进程）。
+
+**并发正确性（踩过的坑，已修）**：加入/退出/RUN 分别由不同线程处理，所以控制面发送被
+**串行化**（`Coordinator.ctrl_lock`）——否则两次并发的 `welcome` 会在同一个 socket 上交错，
+让不同 rank 拿到**不同的 world size**，下一次 collective 就会配对错位而永久卡住
+（这正是"所有人都输入了数字却跑不起来"的根因）。同一把锁也保证"RUN 已发出"和
+"roster 已更新"不会互相插队：RUN 期间有人加入会被明确拒绝，而不是偷偷改掉正在跑的世界。
+测试 F（burst join）专门盯这个：三个同学同时加入时，每个人的 world size 必须一致。
 
 ```bash
 python3 tests/test_robustness.py        # 加入/退出/中断/看门狗 鲁棒性验收

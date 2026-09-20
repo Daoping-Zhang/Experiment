@@ -129,7 +129,13 @@ class ClassroomWorker:
         why = "teacher closed the control connection"
         try:
             while True:
-                m = rt.control.recv()
+                try:
+                    m = rt.control.recv()
+                except ValueError as e:
+                    # one malformed line must not kill the control reader (a
+                    # dead reader means this rank never hears the next RUN)
+                    print("[control] ignoring a malformed message: %s" % e)
+                    continue
                 t = m.get("t")
                 if t == P.C_RUN:
                     self._q.put(RunSpec(params=m["params"]))

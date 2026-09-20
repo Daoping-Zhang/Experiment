@@ -343,7 +343,19 @@ Key points:
   another worker's connection. `PeerTransport.reset_peers()` handles exactly
   that; it is the easiest thing to get wrong.
 - All of this is covered by an automated test:
-  `python3 tests/test_robustness.py` (20 checks, real processes).
+  `python3 tests/test_robustness.py` (25 checks, real processes).
+
+**Concurrency correctness (found the hard way, now fixed)**: joins, leaves and
+runs are handled by different threads, so every control message to a worker is
+sent under one lock (`Coordinator.ctrl_lock`). Without it two concurrent
+`welcome` messages interleaved on the same socket and left different ranks
+believing in **different world sizes** — the next collective then paired ranks
+that disagreed and hung forever (this is exactly the "everyone typed a number
+and it still would not run" symptom). The same lock keeps "a run has been
+sent" and "the roster changed" from overtaking each other: a join during a run
+is refused explicitly instead of quietly rewriting the live world. Test F
+(burst join) guards this: when three students join at once, every one of them
+must agree on the world size.
 
 ```bash
 python3 tests/test_robustness.py        # join/leave/abort/watchdog acceptance

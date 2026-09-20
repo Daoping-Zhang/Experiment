@@ -315,6 +315,51 @@ def scenario_teacher_gone(tmp):
         c.close()
 
 
+# ---------------------------------------------------------------------------
+# F. a burst of joins -> every rank must end up with the SAME world size
+def scenario_burst_join(tmp):
+    """Concurrent welcomes used to interleave on one control socket and leave
+    workers with different world sizes; the next collective then paired ranks
+    that disagreed and deadlocked. All three students join at once here."""
+    c = Class(4, tmp)
+    try:
+        c.start_teacher()
+        for tag in ("w1", "w2", "w3"):
+            c.start_worker(tag)              # no waiting: a burst of joins
+        check("F burst join: all 4 ranks are ready",
+              c.wait_log(r"\[4/4 ranks ready", timeout=45))
+        if not c.wait_menu(1, timeout=45):
+            check("F burst join: teacher reaches its menu", False)
+            return
+        ranks, sizes = [], []
+        for tag in ("w1", "w2", "w3"):
+            log = c.log(tag)
+            last = re.findall(r"\[ROSTER\] You are now Rank (\d+) / (\d+)", log)
+            if last:
+                r, n = last[-1]
+            else:                            # never re-welcomed: startup rank
+                m = re.search(r"Rank: (\d+) / (\d+)", log)
+                if m is None:
+                    r, n = "?", "?"
+                else:
+                    r, n = m.groups()
+            ranks.append(r)
+            sizes.append(n)
+        check("F burst join: every worker agrees on the world size",
+              set(sizes) == {"4"}, "sizes=%s" % sizes)
+        check("F burst join: ranks are unique 1..3",
+              sorted(ranks) == ["1", "2", "3"], "ranks=%s" % ranks)
+        c.menu("3\n16\n2\n1\n")
+        check("F burst join: RUN completes with World Size 4",
+              c.wait_log(r"Running\.\.\.  \(World Size 4\)", timeout=30)
+              and c.wait_log(r"Collective complete", timeout=30))
+        check("F burst join: result = 10 (1+2+3+4)",
+              "final = 10" in c.log()
+              and "Errors: {}" not in c.log().split("Collective complete")[-1])
+    finally:
+        c.close()
+
+
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     tmp = tempfile.mkdtemp(prefix="minimpi_robustness_")
@@ -324,6 +369,7 @@ def main():
     scenario_leave_during_run(tmp)
     scenario_watchdog(tmp)
     scenario_teacher_gone(tmp)
+    scenario_burst_join(tmp)
     print("\nRobustness tests: %d passed, %d failed" % (len(_passed),
                                                         len(_failed)))
     if _failed:

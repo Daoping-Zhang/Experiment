@@ -170,7 +170,15 @@ class Coordinator:
         self.workers = {}            # rank -> control socket (contiguous!)
         self.epid = {}               # rank -> {"host":..,"port":..} (data plane)
         self.peers = {0: {"host": self.advertise, "port": None}}
-        self.lock = threading.Lock()
+        # RLock: roster helpers are called from inside roster-critical
+        # sections (a plain Lock deadlocked the joining thread against
+        # itself the moment a helper re-read the roster size).
+        self.lock = threading.RLock()
+        # Control messages must never interleave: joins, leaves and runs are
+        # handled by different threads, and two concurrent roster broadcasts
+        # on one socket used to garble/reorder welcome messages — which left
+        # workers with DIFFERENT world sizes and deadlocked the next run.
+        self.ctrl_lock = threading.RLock()
         self.closed = False
         self.agg = None
         self.run_active = False      # True while a RUN is in flight
@@ -241,13 +249,15 @@ class Coordinator:
                 "version": P.MINIMPI_VERSION,
                 "protocol": P.PROTOCOL_VERSION}
 
-    def _apply_local_size(self):
+    def _apply_local_size(self, n=None):
         """Rank 0 (this process) adopts the current active world size.
 
         `comm0` is the raw communicator; the MPI.COMM_WORLD facade caches
         rank/size in plain attributes, and the start barrier reads the facade,
-        so both must move together."""
-        n = self.active_size()
+        so both must move together. Callers that already know the size (and
+        may already hold the roster lock) pass it in."""
+        if n is None:
+            n = self.active_size()
         self.comm0.size = n
         cw = getattr(self.rank0, "comm_world", None)
         if cw is not None:
@@ -260,16 +270,18 @@ class Coordinator:
 
         `skip` is the rank that just received its welcome (a new joiner), so
         the log shows one line per actually-updated worker."""
-        with self.lock:
-            targets = [(r, c, self._welcome_msg(r, size))
-                       for r, c in sorted(self.workers.items()) if r != skip]
-        for rank, conn, msg in targets:
-            try:
-                P.ctrl_send(conn, msg)
-                print("[ROSTER] Rank %d re-welcomed (world size is now %d)"
-                      % (rank, size))
-            except OSError:
-                pass
+        with self.ctrl_lock:
+            with self.lock:
+                targets = [(r, c, self._welcome_msg(r, size))
+                           for r, c in sorted(self.workers.items())
+                           if r != skip]
+            for rank, conn, msg in targets:
+                try:
+                    P.ctrl_send(conn, msg)
+                    print("[ROSTER] Rank %d re-welcomed (world size is now %d)"
+                          % (rank, size))
+                except OSError:
+                    pass
         if reason:
             print("[ROSTER] %s  ->  World Size %d (%d student ranks)"
                   % (reason, size, size - 1))
@@ -299,27 +311,30 @@ class Coordinator:
 
     def _on_worker_left(self, rank, who=""):
         """A worker disconnected: compact the roster and keep the class sane."""
-        with self.lock:
-            running = self.run_active
-            self.workers.pop(rank, None)
-            self.epid.pop(rank, None)
-        print("[LEAVE] Rank %d disconnected%s%s"
-              % (rank, ("  (during a RUN)" if running else ""),
-                 ("  [%s]" % who) if who and who != "?" else ""))
-        if running:
-            # Mid-RUN departure: the collective can never complete.
-            self.roster_dirty = True
-            self._abort_run("Rank %d left during the run" % rank)
-            # Remaining workers are re-welcomed once the RUN has unwound
-            # (see _sync_roster_after_run).
-            return
-        size = self._apply_local_size()
-        with self.lock:
-            moves = self._rebuild_roster_locked()
-        if moves:
-            print("[ROSTER] rank compaction: %s"
-                  % ", ".join("%d -> %d" % mv for mv in moves))
-        self._broadcast_roster(size, "Rank %d left" % rank)
+        with self.ctrl_lock:
+            with self.lock:
+                running = self.run_active
+                self.workers.pop(rank, None)
+                self.epid.pop(rank, None)
+            print("[LEAVE] Rank %d disconnected%s%s"
+                  % (rank, ("  (during a RUN)" if running else ""),
+                     ("  [%s]" % who) if who and who != "?" else ""))
+            if running:
+                # Mid-RUN departure: the collective can never complete. (The
+                # check is INSIDE the control lock, so the roster can never be
+                # rewritten after a RUN has already been sent.)
+                self.roster_dirty = True
+                self._abort_run("Rank %d left during the run" % rank)
+                # Remaining workers are re-welcomed once the RUN has unwound
+                # (see _sync_roster_after_run).
+                return
+            size = self._apply_local_size()
+            with self.lock:
+                moves = self._rebuild_roster_locked()
+            if moves:
+                print("[ROSTER] rank compaction: %s"
+                      % ", ".join("%d -> %d" % mv for mv in moves))
+            self._broadcast_roster(size, "Rank %d left" % rank)
 
     def _sync_roster_after_run(self):
         """Apply roster changes that arrived while a RUN was in flight."""
@@ -368,45 +383,51 @@ class Coordinator:
                        "copy (git pull) and restart"
                        % (wv or "unknown/old copy", wp,
                           P.MINIMPI_VERSION, P.PROTOCOL_VERSION))
-                P.ctrl_send(conn, {"t": P.C_ERROR, "why": why})
+                with self.ctrl_lock:
+                    P.ctrl_send(conn, {"t": P.C_ERROR, "why": why})
                 print("[VERSION] rejected a worker: %s\n"
                       "[JOIN] %s -> REJECTED: %s" % (why, who, why))
                 return
-            with self.lock:
-                if self.run_active:
-                    why = ("a collective run is in progress — wait for it to "
-                           "finish and join again")
-                    P.ctrl_send(conn, {"t": P.C_ERROR, "why": why})
-                    print("[JOIN] %s -> REJECTED: %s" % (who, why))
-                    return
-                free = [r for r in range(1, self.size) if r not in self.workers]
-                if not free:
-                    P.ctrl_send(conn, {"t": P.C_ERROR,
-                                       "why": "world already full"})
-                    print("[JOIN] %s -> REJECTED: world already full "
-                          "(size=%d)" % (who, self.size))
-                    return
-                rank = free[0]                    # lowest free rank
-                self.workers[rank] = conn
-                self.epid[rank] = {"host": msg["host"],
-                                   "port": int(msg["port"])}
-                moves = self._rebuild_roster_locked()
-                ready = len(self.workers) + 1
-                total = self.size
-            if moves:
-                print("[ROSTER] rank compaction: %s"
-                      % ", ".join("%d -> %d" % mv for mv in moves))
-            welcome = self._welcome_msg(rank, ready)
-            P.ctrl_send(conn, welcome)
-            self._apply_local_size()
-            print("[JOIN] %s -> Rank %d  (data plane %s:%s)  "
-                  "[%d/%d ranks ready%s]"
-                  % (who, rank, msg.get("host"), msg.get("port"),
-                     ready, total,
-                     "" if ready == total else " - capacity"))
-            # Everybody else (including ranks that just moved down) adopts the
-            # new roster; the class keeps working without a restart.
-            self._broadcast_roster(ready, None, skip=rank)
+            # Registering a worker, welcoming it and telling everybody else
+            # must be ONE atomic control step: a RUN may not slip in between,
+            # and two joins may not write to one socket at the same time.
+            with self.ctrl_lock:
+                with self.lock:
+                    if self.run_active:
+                        why = ("a collective run is in progress — wait for it "
+                               "to finish and join again")
+                        P.ctrl_send(conn, {"t": P.C_ERROR, "why": why})
+                        print("[JOIN] %s -> REJECTED: %s" % (who, why))
+                        return
+                    free = [r for r in range(1, self.size)
+                            if r not in self.workers]
+                    if not free:
+                        P.ctrl_send(conn, {"t": P.C_ERROR,
+                                           "why": "world already full"})
+                        print("[JOIN] %s -> REJECTED: world already full "
+                              "(size=%d)" % (who, self.size))
+                        return
+                    rank = free[0]                # lowest free rank
+                    self.workers[rank] = conn
+                    self.epid[rank] = {"host": msg["host"],
+                                       "port": int(msg["port"])}
+                    moves = self._rebuild_roster_locked()
+                    ready = len(self.workers) + 1
+                    total = self.size
+                    welcome = self._welcome_msg(rank, ready)
+                    self._apply_local_size(ready)
+                if moves:
+                    print("[ROSTER] rank compaction: %s"
+                          % ", ".join("%d -> %d" % mv for mv in moves))
+                P.ctrl_send(conn, welcome)
+                print("[JOIN] %s -> Rank %d  (data plane %s:%s)  "
+                      "[%d/%d ranks ready%s]"
+                      % (who, rank, msg.get("host"), msg.get("port"),
+                         ready, total,
+                         "" if ready == total else " - capacity"))
+                # Everybody else (including ranks that just moved down) adopts
+                # the new roster; the class keeps working without a restart.
+                self._broadcast_roster(ready, None, skip=rank)
             while not self.closed:
                 m = P.ctrl_recv_line(conn)
                 if m is None:            # peer went away
@@ -459,8 +480,12 @@ class Coordinator:
         self._check_ok, self._check_fail = {}, {}
         n = self.active_size()
         msg = {"t": P.C_CHECK, "peers": self.peers}
-        for conn in list(self.workers.values()):
-            P.ctrl_send(conn, msg)
+        with self.ctrl_lock:
+            for conn in list(self.workers.values()):
+                try:
+                    P.ctrl_send(conn, msg)
+                except OSError:
+                    pass
         self._self_check()
         deadline = time.time() + 30
         while len(self._check_ok) < n and time.time() < deadline:
@@ -498,11 +523,12 @@ class Coordinator:
         self._check_fail[0] = set(fail)
 
     def send_to_workers(self, obj):
-        for rank, conn in list(self.workers.items()):
-            try:
-                P.ctrl_send(conn, obj)
-            except OSError:
-                pass
+        with self.ctrl_lock:
+            for rank, conn in list(self.workers.items()):
+                try:
+                    P.ctrl_send(conn, obj)
+                except OSError:
+                    pass
 
     def run_demo(self, params, mode):
         # Current roster — a RUN always uses the ranks that are here NOW.
@@ -534,11 +560,15 @@ class Coordinator:
                 self.rank0._local_ctx = T.RoundCtx(self.rank0._alg, n,
                                                    0, [v0] * ds)
         params["value0"] = value0      # rank-0 dispatch arg (local only)
-        self.run_active = True
         self.comm0.default_timeout = None      # no deadline on a healthy RUN
         agg.activity_fn = lambda: len(self.events0.events)
         try:
-            self.send_to_workers({"t": P.C_RUN, "params": _without_value0(params)})
+            with self.ctrl_lock:
+                # "a run is in flight" and the RUN itself are one step, so a
+                # join or a leave can never rewrite the roster in between.
+                self.run_active = True
+                self.send_to_workers(
+                    {"t": P.C_RUN, "params": _without_value0(params)})
             self._start_rank0(agg, params)
             timeout = _run_timeout()
             if not agg.wait_all_done(timeout=timeout, idle=timeout):
@@ -552,7 +582,8 @@ class Coordinator:
                         "watchdog: no rank reported progress for %ds "
                         "(done=%s)" % (timeout, sorted(agg.done)))
         finally:
-            self.run_active = False
+            with self.ctrl_lock:
+                self.run_active = False
             self.agg = None
             # Let rank 0's algorithm thread unwind WHILE the abort is still
             # armed, then make the transport healthy again.
