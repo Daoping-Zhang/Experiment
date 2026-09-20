@@ -230,6 +230,8 @@ class Coordinator:
         self.roster_dirty = False    # roster changed during a RUN
         self.exclude_suspects = {}   # ranks to drop after a stalled RUN
         self.abort_epoch = 0         # bumped on every abort (cancels pauses)
+        self.last_seen = {}          # rank -> monotonic of its last heartbeat
+        self.pause_menu = threading.Event()   # ask a pause to open the roster
         self._roster_reset = True    # rank-0 peer cache needs rebuilding
         # teacher-clock timings (ns)
         self._timing = {"start": None, "gather": {}, "release": {},
@@ -254,6 +256,16 @@ class Coordinator:
         """Current world size = rank 0 (teacher) + every joined worker."""
         with self.lock:
             return len(self.workers) + 1
+
+    def liveness_age(self, rank):
+        """Seconds since this rank's last heartbeat (None if never heard)."""
+        with self.lock:
+            t = self.last_seen.get(rank)
+        return None if t is None else time.monotonic() - t
+
+    def note_heartbeat(self, rank):
+        with self.lock:
+            self.last_seen[rank] = time.monotonic()
 
     def roster_snapshot(self):
         """(active world size, worker ranks) — one consistent read, so the
@@ -387,6 +399,53 @@ class Coordinator:
                 print("[ROSTER] rank compaction: %s"
                       % ", ".join("%d -> %d" % mv for mv in moves))
             self._broadcast_roster(size, "Rank %d left" % rank)
+
+    def kick_rank(self, rank, why=""):
+        """Remove one rank from the class ON PURPOSE.
+
+        The teacher's manual tool: a student's machine is stuck, somebody has
+        to leave, or a RUN is waiting for a rank that will never answer. The
+        worker is told first (C_KICK) so it can report "removed by the teacher"
+        instead of a socket error; then the control connection is shut down,
+        which runs the normal LEAVE path (compaction + re-welcome, or an abort
+        if a RUN is in flight). Works even for a frozen rank — it simply never
+        reads the message and exits when it wakes up.
+        """
+        if rank == 0:
+            print("[KICK] Rank 0 is the teacher — nothing to kick.")
+            return False
+        with self.lock:
+            conn = self.workers.get(rank)
+        if conn is None:
+            print("[KICK] Rank %d is not in the class." % rank)
+            return False
+        why = why or "the teacher removed this rank from the class"
+        print("\n[KICK] removing Rank %d — %s" % (rank, why))
+        with self.ctrl_lock:
+            try:
+                P.ctrl_send(conn, {"t": P.C_KICK, "why": why})
+            except OSError:
+                pass
+        time.sleep(0.2)                  # let the message arrive before we hang up
+        try:
+            conn.shutdown(socket.SHUT_RDWR)   # wakes its reader -> LEAVE path
+        except OSError:
+            pass
+        try:
+            conn.close()
+        except OSError:
+            pass
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            with self.lock:
+                still = any(c is conn for c in self.workers.values())
+            if not still:
+                break
+            time.sleep(0.05)
+        print("[KICK] Rank %d removed. World size is now %d (%d student "
+              "rank(s)); the class keeps running."
+              % (rank, self.active_size(), self.active_size() - 1))
+        return True
 
     def _exclude_suspects(self):
         """Drop the ranks a stalled RUN never heard from.
@@ -565,6 +624,7 @@ class Coordinator:
                 val = base64.b64decode(val["raw"])
             agg.worker_done(rank, value=val, error=m.get("error"))
         elif t == P.C_HEARTBEAT:
+            self.note_heartbeat(rank)    # roster view: who is really alive
             if agg:
                 agg.heartbeat(rank)      # alive and waiting (not frozen)
         elif t == P.C_ERROR:
@@ -678,7 +738,30 @@ class Coordinator:
                     {"t": P.C_RUN, "params": _without_value0(params)})
             self._start_rank0(agg, params)
             timeout = _run_timeout()
-            if not agg.wait_all_done(timeout=timeout, idle=timeout):
+            while True:
+                try:
+                    finished = agg.wait_all_done(timeout=timeout, idle=timeout)
+                    break
+                except KeyboardInterrupt:
+                    # The teacher sees a stuck class and presses Ctrl-C: never
+                    # crash, offer the roster and the option to remove a rank.
+                    # If a teaching pause is waiting for ENTER it owns stdin,
+                    # so it serves the request instead (two threads must never
+                    # read the keyboard at once).
+                    if pause_active():
+                        self.pause_menu.set()
+                        print("\n[PAUSE] the RUN is still waiting — opening "
+                              "the roster/kick prompt...")
+                    else:
+                        print("\n[PAUSE] the RUN is still waiting.\n"
+                              "[PAUSE] remove a rank that will not answer and "
+                              "the RUN is aborted; the class continues with "
+                              "the rest.")
+                        roster_and_kick(self)
+                    if not self.roster_snapshot()[1]:
+                        finished = False
+                        break
+            if not finished:
                 if agg.aborted:
                     print("[ABORTED] %s (done=%s)"
                           % (agg.aborted, sorted(agg.done)))
@@ -1089,6 +1172,37 @@ def _fmt_value(v):
 
 _STDIN_Q = None
 _STDIN_LOCK = threading.Lock()
+# Who owns the keyboard right now. A teaching pause reads stdin on rank 0's
+# algorithm thread while a menu/roster prompt reads it on the main thread; if
+# both simply waited on the same queue, a line typed for one of them could be
+# eaten by the other. Interactive prompts take priority; a pause then keeps
+# waiting (it never steals) until no prompt is active.
+_OWNER_LOCK = threading.Lock()
+_INTERACTIVE_READERS = [0]
+# Is a teaching pause waiting for ENTER right now? If it is, a Ctrl-C during a
+# RUN must be handled BY THAT PAUSE: one thread owns stdin at a time, so a line
+# can never be stolen by the other one.
+_PAUSE_ACTIVE = [0]
+
+
+def _owner_add(delta):
+    with _OWNER_LOCK:
+        _INTERACTIVE_READERS[0] += delta
+
+
+def _owner_active():
+    with _OWNER_LOCK:
+        return _INTERACTIVE_READERS[0] > 0
+
+
+def _pause_add(delta):
+    with _OWNER_LOCK:
+        _PAUSE_ACTIVE[0] += delta
+
+
+def pause_active():
+    with _OWNER_LOCK:
+        return _PAUSE_ACTIVE[0] > 0
 
 
 def _stdin_pump():
@@ -1123,9 +1237,48 @@ def read_line(prompt, coord=None):
     sys.stdout.write(prompt)
     sys.stdout.flush()
     epoch = getattr(coord, "abort_epoch", 0) if coord is not None else None
+    interactive = coord is None
+    if interactive:
+        _owner_add(1)
+    else:
+        _pause_add(1)
+    try:
+        return _read_line_loop(coord, epoch, interactive)
+    finally:
+        if interactive:
+            _owner_add(-1)
+        else:
+            _pause_add(-1)
+
+
+def _read_line_loop(coord, epoch, interactive):
     while True:
+        if not interactive and getattr(coord, "pause_menu", None) is not None \
+                and coord.pause_menu.is_set():
+            # the main thread asked for the teacher tool (Ctrl-C during a RUN):
+            # this pause owns the keyboard, so it serves the request
+            coord.pause_menu.clear()
+            print("\n[PAUSE] the RUN is still waiting.\n"
+                  "[PAUSE] remove a rank that will not answer and the RUN is "
+                  "aborted; the class continues with the rest.")
+            roster_and_kick(coord)
+            return ""
+        if not interactive and _owner_active():
+            # a menu / roster prompt owns the keyboard: keep waiting, do not
+            # consume the line the teacher is typing for it
+            time.sleep(0.05)
+            continue
         try:
-            line = _STDIN_Q.get(timeout=0.2)
+            line = _STDIN_Q.get(timeout=0.2 if interactive else 0.05)
+        except KeyboardInterrupt:
+            # Ctrl-C must never kill rank 0 (that would break the class). While
+            # a RUN is in flight it opens the teacher tool instead: who is in
+            # the class, and remove a rank that will not answer.
+            print("\n[PAUSE] interrupted. The RUN keeps waiting; no rank was "
+                  "dropped.")
+            if coord is not None:
+                roster_and_kick(coord)
+            return ""
         except queue.Empty:
             if coord is None:
                 continue
@@ -1441,7 +1594,60 @@ MENU = [
     ("Performance Benchmark", "benchmark"),
     ("Network Check", "network"),
     ("Exit", "exit"),
+    # teacher tools (10 is printed after Exit on purpose: 9 must stay Exit)
+    ("Roster — who is in the class / kick a rank", "kick"),
 ]
+
+
+def roster_and_kick(coord):
+    """Teacher tool: show who is really in the class, and remove somebody.
+
+    Joins and departures are automatic and live; this is for the cases the
+    teacher must decide: a student's machine that stopped answering, somebody
+    who has to leave, or a RUN blocked by a rank that will never reply.
+    """
+    print("\n========================================\n"
+          "Class Roster\n"
+          "========================================")
+    n, ranks = coord.roster_snapshot()
+    stale = P.HEARTBEAT_STALE_S
+    print("Rank 0  teacher (this machine)          —")
+    for r in ranks:
+        ep = coord.peers.get(r, {})
+        age = coord.liveness_age(r)
+        if age is None:
+            state = "no heartbeat yet"
+        elif age > stale:
+            state = "SILENT — no heartbeat for %.1f s" % age
+        else:
+            state = "alive (heartbeat %.1f s ago)" % age
+        print("Rank %-2d %-32s %s" % (r, "%s:%s" % (ep.get("host", "?"),
+                                                   ep.get("port", "?")), state))
+    print("\nActive world size: %d (capacity %d)%s"
+          % (n, coord.size,
+             "   [a RUN is in flight]" if coord.run_active else ""))
+    print("[ROSTER] joining and leaving are automatic — this tool is for "
+          "decisions only the teacher can make.")
+    raw = read_line("\nKick which rank? (number, ENTER = cancel)\n> ").strip()
+    if not raw:
+        print("(cancelled)")
+        return
+    if not raw.isdigit() or int(raw) not in ranks:
+        print("[KICK] %r is not an active student rank." % raw)
+        return
+    rank = int(raw)
+    age = coord.liveness_age(rank)
+    if age is not None and age > stale:
+        print("[KICK] Rank %d has not sent a heartbeat for %.1f s — it may "
+              "already be gone." % (rank, age))
+    if coord.run_active:
+        print("[KICK] a RUN is in flight: removing Rank %d ABORTS that RUN; "
+              "the class then continues with the remaining ranks." % rank)
+    if read_line("Kick Rank %d? [y/N] " % rank).strip().lower() not in ("y",
+                                                                      "yes"):
+        print("(cancelled)")
+        return
+    coord.kick_rank(rank)
 
 
 def wait_ready(coord, size, require_full=True, quiesce=3.0):
@@ -1577,6 +1783,8 @@ def main():
                       "menu will pick it up. A RUN now would be Rank 0 alone "
                       "(World Size 1 is not a collective).")
             for i, (label, _) in enumerate(MENU, 1):
+                if i == len(MENU):           # teacher tools come after Exit
+                    print("\nTeacher tools:")
                 print("%d. %s" % (i, label))
             try:
                 choice = read_line("\nSelect: ").strip()
@@ -1586,6 +1794,9 @@ def main():
                 break
             if choice in ("8", "network"):
                 coord.connectivity_check()
+                continue
+            if choice in ("10", "kick", "roster", "r"):
+                roster_and_kick(coord)
                 continue
             if choice in ("7", "benchmark"):
                 run_benchmark(coord)

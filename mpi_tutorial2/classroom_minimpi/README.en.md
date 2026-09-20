@@ -346,6 +346,59 @@ Key points:
 - All of this is covered by an automated test:
   `python3 tests/test_robustness.py` (**54 checks, real processes**).
 
+#### Teacher-side roster and kick (menu 10)
+
+Joining and leaving are AUTOMATIC — the teacher does nothing. Two situations
+still need a human decision, though: a student's machine that stopped
+answering, and a student who has to leave. So the menu has one teacher tool:
+
+```text
+9. Exit
+
+Teacher tools:
+10. Roster — who is in the class / kick a rank
+
+Select: 10
+
+========================================
+Class Roster
+========================================
+Rank 0  teacher (this machine)          —
+Rank 1  192.168.1.45:51234              alive (heartbeat 0.4 s ago)
+Rank 2  192.168.1.46:51239              SILENT — no heartbeat for 12.3 s
+Rank 3  192.168.1.47:51241              alive (heartbeat 1.1 s ago)
+
+Active world size: 4 (capacity 6)
+Kick which rank? (number, ENTER = cancel)
+> 2
+[KICK] Rank 2 has not sent a heartbeat for 12.3 s — it may already be gone.
+Kick Rank 2? [y/N] y
+[KICK] removing Rank 2 — the teacher removed this rank from the class
+[KICK] Rank 2 removed. World size is now 3 (2 student rank(s)); the class keeps running.
+```
+
+- The roster shows who is REALLY alive (heartbeat age); `SILENT` is the machine
+  that stopped answering.
+- The kicked student sees `[KICKED] the teacher removed this rank from the
+  class` and exits cleanly (no traceback); restarting the worker joins again as
+  a new student.
+
+**Kicking while a RUN is stuck**: the menu is unavailable during a RUN, so the
+teacher presses **Ctrl-C once** (no crash, no exit):
+
+```text
+[PAUSE] the RUN is still waiting — opening the roster/kick prompt...
+Class Roster ... (as above)
+Kick which rank? > 2
+Kick Rank 2? [y/N] y
+[KICK] Rank 2 removed. World size is now 2 (1 student rank(s)); the class keeps running.
+[ABORT] Rank 2 left during the run     <- the stuck RUN ends at once, class continues
+```
+
+So a stuck classroom never has to wait for a timeout: the teacher looks at the
+roster, removes the rank that stopped answering, and the rest carry on.
+(`MINIMPI_RUN_TIMEOUT` degrades to a fallback for when nobody is watching.)
+
 #### Flow-by-flow audit: what happens if a worker leaves at that moment
 
 | When the worker leaves | Behaviour | Can the class stall? |
@@ -363,6 +416,8 @@ Key points:
 | Everybody leaves (world size becomes 1) | The menu says a RUN would be Rank 0 alone; such a RUN still completes | No |
 | Somebody tries to JOIN during a RUN | Refused explicitly (`code=busy`); the worker no longer reports `VERSION MISMATCH` but `[JOIN REFUSED]` and **retries every 3 s (up to 60 times)**, joining as a latecomer as soon as the run ends | No |
 | The world size changes (a class of 3) | In the benchmark, RD (power-of-two only) and Ring cases whose payload is not divisible by 3 print `[skip]` and show `n/a` instead of recording meaningless numbers | No |
+| **The teacher kicks a rank** (idle, menu 10) | That rank gets `C_KICK`, prints `[KICKED]` and exits cleanly; the rest are compacted and re-welcomed | No |
+| **The teacher kicks a rank** (stuck RUN, Ctrl-C -> roster -> kick) | The RUN is aborted at once, the rank is removed from the roster, and the class continues with the rest | No |
 
 **Concurrency correctness (found the hard way, now fixed)**: joins, leaves and
 runs are handled by different threads, so every control message to a worker is

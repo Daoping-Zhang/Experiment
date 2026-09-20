@@ -270,6 +270,54 @@ worker : [VERSION MISMATCH] ... Please update this student copy (git pull /
   rank 会复用到别人的连接——这是最容易出错的地方，`PeerTransport.reset_peers()` 专门处理它。
 - 这些场景都有自动化验收：`python3 tests/test_robustness.py`（**54 项检查，全部真实进程**）。
 
+#### 老师端动态管理：名单 + 踢人（菜单 10）
+
+加入/退出本身是**自动**的，老师不需要做任何事。但有两种情况只有老师能决定：
+某个同学的机器不再回应，或者这位同学必须离开。所以菜单里有一个老师工具：
+
+```text
+9. Exit
+
+Teacher tools:
+10. Roster — who is in the class / kick a rank
+
+Select: 10
+
+========================================
+Class Roster
+========================================
+Rank 0  teacher (this machine)          —
+Rank 1  192.168.1.45:51234              alive (heartbeat 0.4 s ago)
+Rank 2  192.168.1.46:51239              SILENT — no heartbeat for 12.3 s
+Rank 3  192.168.1.47:51241              alive (heartbeat 1.1 s ago)
+
+Active world size: 4 (capacity 6)
+Kick which rank? (number, ENTER = cancel)
+> 2
+[KICK] Rank 2 has not sent a heartbeat for 12.3 s — it may already be gone.
+Kick Rank 2? [y/N] y
+[KICK] removing Rank 2 — the teacher removed this rank from the class
+[KICK] Rank 2 removed. World size is now 3 (2 student rank(s)); the class keeps running.
+```
+
+- 名单里能直接看到**谁真的活着**（心跳时间）；`SILENT` 就是那台不再回应的机器。
+- 被踢的同学会看到 `[KICKED] the teacher removed this rank from the class`，然后干净退出
+  （不是一堆 traceback）；想回来就重启 worker —— 会作为一个新同学重新加入。
+
+**RUN 卡住时也能踢**：RUN 进行中菜单不可用，此时按一次 **Ctrl-C**（不会退出、不会崩）：
+
+```text
+[PAUSE] the RUN is still waiting — opening the roster/kick prompt...
+Class Roster ... （同上）
+Kick which rank? > 2
+Kick Rank 2? [y/N] y
+[KICK] Rank 2 removed. World size is now 2 (1 student rank(s)); the class keeps running.
+[ABORT] Rank 2 left during the run     ← 卡住的 RUN 立刻结束，课堂继续
+```
+
+也就是说：**卡住的课堂不需要等任何超时**——老师看一眼名单、踢掉不回应的那一位，剩下的人马上继续。
+（`MINIMPI_RUN_TIMEOUT` 的停车看门狗退化成"老师不在场时的兜底"。）
+
 #### 逐流程审计：worker 在哪个时刻退出会怎样
 
 | Worker 退出的时刻 | 行为 | 课堂是否卡住 |
@@ -287,6 +335,8 @@ worker : [VERSION MISMATCH] ... Please update this student copy (git pull /
 | 全部同学都退出（World Size 变成 1） | 菜单提示"现在跑就是 Rank 0 一个人"；此时 RUN 仍能正常完成 | 不会 |
 | RUN 进行中有人**想加入** | 明确拒绝（`code=busy`），worker 端不再是 `VERSION MISMATCH` 而是 `[JOIN REFUSED]`，并且**自动每 3 秒重试最多 60 次**，RUN 一结束就作为迟到者加入 | 不会 |
 | 世界人数变了（3 人班） | Benchmark 里 RD（需要 2 的幂）与"载荷不能被 3 整除"的 Ring 会打印 `[skip]`，表里显示 `n/a`，不再记录无意义的数字 | 不会 |
+| **老师主动踢人**（空闲时，菜单 10） | 该 rank 收到 `C_KICK` 并打印 `[KICKED]` 后干净退出；其余 rank 压缩 + 重新 welcome | 不会 |
+| **老师主动踢人**（RUN 卡住时，Ctrl-C → 名单 → 踢） | 立刻 abort 这个 RUN，踢掉的 rank 从名单移除，课堂用剩下的人继续 | 不会 |
 
 **并发正确性（踩过的坑，已修）**：加入/退出/RUN 分别由不同线程处理，所以控制面发送被
 **串行化**（`Coordinator.ctrl_lock`）——否则两次并发的 `welcome` 会在同一个 socket 上交错，

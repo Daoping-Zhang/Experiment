@@ -117,6 +117,14 @@ def run_classroom(comm):
                       % (run.params.get("rank"), run.params.get("size")))
                 continue
 
+            if run.kind == "kicked":
+                # Teacher removed this rank (a stuck/duplicate student, or a
+                # machine that is only half alive). Say so plainly and stop.
+                print("\n[KICKED] %s" % run.params.get("why"))
+                print("[KICKED] this worker left the class. Restart it to "
+                      "join again.")
+                return
+
             if run.kind == "abort":
                 print("\n[ABORT] %s"
                       % (run.params.get("why") or "this RUN was cancelled"))

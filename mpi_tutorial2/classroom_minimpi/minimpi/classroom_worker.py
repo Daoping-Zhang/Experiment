@@ -78,6 +78,7 @@ class ClassroomWorker:
         self._q = None
         self._reader = None
         self._beat = None
+        self.kicked = False
         self._benchmark_value = None
         self._benchmark_announced = False
 
@@ -134,13 +135,18 @@ class ClassroomWorker:
         A rank blocked in a barrier looks exactly like a frozen rank on the
         data plane; the heartbeat is what separates "waiting" from "gone", so a
         stalled RUN can name the student whose machine stopped answering."""
-        while self._rt is not None and self._rt.control is not None:
+        while (self._rt is not None and self._rt.control is not None
+               and not self.kicked):
             try:
                 self._rt.control.send({"t": P.C_HEARTBEAT,
                                        "rank": self._rt.rank})
             except OSError:
                 return
             time.sleep(P.HEARTBEAT_S)
+
+    def _rt_abort(self, why):
+        if self._rt is not None:
+            self._rt.abort_run(why)
 
     def _read_loop(self):
         rt = self._rt
@@ -163,6 +169,14 @@ class ClassroomWorker:
                                                 "rank": m.get("rank"),
                                                 "size": m.get("size"),
                                                 "peers": m.get("peers", {})}))
+                elif t == P.C_KICK:
+                    # the teacher removed this rank: stop the heartbeat, end
+                    # any RUN we are stuck in and shut down cleanly
+                    self.kicked = True
+                    self._rt_abort("removed from the class by the teacher")
+                    self._q.put(RunSpec(params={
+                        "kind": "kicked",
+                        "why": m.get("why") or "the teacher removed this rank"}))
                 elif t == P.C_ABORT:
                     # a rank left / teacher cancelled: unblock immediately
                     if self._rt is not None:

@@ -79,6 +79,7 @@ C_DONE = "collective_done"      # worker -> teacher: algorithm finished (+ value
 C_SUMMARY = "summary"           # teacher -> worker: benchmark summary (display)
 C_ABORT = "abort"                # teacher -> worker: cancel current RUN
 C_HEARTBEAT = "heartbeat"        # worker -> teacher: "I am alive and waiting"
+C_KICK = "kick"                  # teacher -> worker: you were removed from the class
 # A worker that stops sending heartbeats is frozen (asleep laptop, dead VM,
 # stopped process) — the only reliable way to tell it apart from a rank that is
 # simply blocked in a barrier, since both look silent on the data plane.

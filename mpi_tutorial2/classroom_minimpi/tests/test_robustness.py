@@ -653,6 +653,93 @@ def scenario_join_during_run(tmp):
         c.close()
 
 
+# ---------------------------------------------------------------------------
+# M. the teacher KICKS an idle rank (manual removal)
+def scenario_kick_idle(tmp):
+    """Dynamic membership is automatic, but the teacher must also be able to
+    remove somebody on purpose — a stuck machine, or a student who has to go."""
+    c = Class("M", 4, tmp)
+    try:
+        c.start_teacher()
+        c.start_worker("w1")
+        c.wait_log(r"\[JOIN\] .* -> Rank 1 ", timeout=25)
+        c.start_worker("w2")
+        c.wait_log(r"\[JOIN\] .* -> Rank 2 ", timeout=25)
+        if not c.wait_menu(1, timeout=45):
+            check("M kick idle: menu reached", False)
+            return
+        c.menu("10\n")                      # ask for the roster
+        check("M kick idle: the roster lists every rank",
+              c.wait_log(r"Class Roster", timeout=20)
+              and c.wait_log(r"Rank 2\s+127\.0\.0\.1:", timeout=10)
+              and c.wait_log(r"Active world size: 3", timeout=10))
+        c.menu("2\ny\n")                  # kick Rank 2 and confirm
+        check("M kick idle: the teacher says what it is doing",
+              c.wait_log(r"\[KICK\] removing Rank 2", timeout=20))
+        check("M kick idle: the kicked worker is told and exits cleanly",
+              c.wait_log(r"\[KICKED\]", timeout=25, tag="w2"))
+        check("M kick idle: the class continues with the rest",
+              c.wait_log(r"\[KICK\] Rank 2 removed.*World size is now 2",
+                         timeout=20)
+              and c.wait_log(r"\[ROSTER\] Rank \d+ left  ->  World Size 2",
+                             timeout=20))
+        c.menu("3\n16\n2\n1\n")
+        check("M kick idle: next RUN uses World Size 2 (1+2=3)",
+              c.wait_log(r"Running\.\.\.  \(World Size 2\)", timeout=30)
+              and c.wait_log(r"Collective complete", timeout=30)
+              and "final = 3" in c.log())
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------------
+# N. the teacher KICKS the frozen rank that is stalling a RUN (Ctrl-C tool)
+def scenario_kick_stuck_run(tmp):
+    """The manual answer to a stuck class: Ctrl-C during a RUN shows the roster
+    and lets the teacher remove the rank that stopped answering, so the class
+    continues immediately (no waiting for any timeout)."""
+    c = Class("N", 3, tmp, teacher_env={"MINIMPI_RUN_TIMEOUT": "120"})
+    try:
+        c.start_teacher()
+        c.start_worker("w1")
+        c.wait_log(r"\[JOIN\] .* -> Rank 1 ", timeout=25)
+        c.start_worker("w2")
+        c.wait_log(r"\[JOIN\] .* -> Rank 2 ", timeout=25)
+        if not c.wait_menu(1, timeout=45):
+            check("N kick stuck RUN: menu reached", False)
+            return
+        c.menu("3\n16\n1\n1\n")           # teaching run
+        if not c.wait_log(r"Running\.\.\.  \(World Size 3\)", timeout=25):
+            check("N kick stuck RUN: run started", False)
+            return
+        c.freeze("w2")                      # its machine stops answering
+        # the teacher watches the class hang until the heartbeats go stale
+        time.sleep(8.0)
+        os.kill(c.teacher.pid, signal.SIGINT)   # teacher presses Ctrl-C
+        check("N kick stuck RUN: Ctrl-C shows the roster, not a crash",
+              c.wait_log(r"\[PAUSE\] the RUN is still waiting", timeout=25)
+              and c.wait_log(r"Class Roster", timeout=15))
+        check("N kick stuck RUN: the frozen rank is called out",
+              c.wait_log(r"Rank 2\s+127\.0\.0\.1:\d+\s+SILENT", timeout=20))
+        c.menu("2\ny\n")
+        check("N kick stuck RUN: the teacher removes it",
+              c.wait_log(r"\[KICK\] Rank 2 removed", timeout=20))
+        check("N kick stuck RUN: the RUN is aborted, not left waiting",
+              c.wait_log(r"\[ABORT\] Rank 2 left during the run", timeout=20))
+        if not c.wait_count(r"World Size: 2 \(capacity 3, 1 student",
+                            1, timeout=45):
+            check("N kick stuck RUN: the class is usable again", False)
+            return
+        check("N kick stuck RUN: the class is usable again", True)
+        c.menu("3\n16\n2\n1\n")
+        check("N kick stuck RUN: next RUN completes without it",
+              c.wait_log(r"Running\.\.\.  \(World Size 2\)", timeout=35)
+              and c.wait_log(r"Collective complete", timeout=30)
+              and "final = 3" in c.log())
+    finally:
+        c.close()
+
+
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     tmp = tempfile.mkdtemp(prefix="minimpi_robustness_")
@@ -670,6 +757,8 @@ def main():
     scenario_frozen_worker(tmp)
     scenario_leave_during_benchmark(tmp)
     scenario_join_during_run(tmp)
+    scenario_kick_idle(tmp)
+    scenario_kick_stuck_run(tmp)
     print("\nRobustness tests: %d passed, %d failed" % (len(_passed),
                                                         len(_failed)))
     if _failed:

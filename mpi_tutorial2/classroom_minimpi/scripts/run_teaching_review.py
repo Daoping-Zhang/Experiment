@@ -151,7 +151,18 @@ world size is rank 0 + the workers that are here now, and it may differ.
   * teacher input: ONE thread owns stdin (`read_line`); the menu's input() used
     to swallow buffered ENTERs, after which a teaching pause waited forever
     while its input sat unread ("everyone typed a number and it would not run").
-* New automated suite `tests/test_robustness.py`: 54 checks over real
+* Teacher-side roster + KICK (menu item 10; 9 stays Exit):
+  * the roster shows every rank with its data-plane endpoint and HEARTBEAT age,
+    so a machine that stopped answering is visible (`SILENT - no heartbeat for
+    12.3 s`);
+  * kicking a rank sends `C_KICK` first (the worker prints `[KICKED] ...` and
+    exits cleanly, and can rejoin by restarting) and then runs the normal
+    LEAVE path (compaction + re-welcome, or an abort if a RUN is in flight);
+  * Ctrl-C during a stuck RUN opens the same tool from the teaching pause, so a
+    wedged class is fixed in seconds by the teacher instead of waiting for any
+    timeout. Exactly one thread owns stdin at a time: while a pause waits for
+    ENTER the pause serves the Ctrl-C request, otherwise the main thread does.
+* New automated suite `tests/test_robustness.py`: 65 checks over real
   teacher/worker processes — leave while idle, late join, leave during a run
   (no hang, menu still usable, next RUN correct), watchdog, teacher
   disappears, and a BURST join (three students join at once; every rank must
@@ -206,7 +217,7 @@ test_final_behavior (T-Z: RD topology/correctness, LOCAL TIMELINE semantics,
 synchronization window, benchmark one-input/no-zero-data-size/median-summary),
 test_version_guard (join-time version refusal), test_robustness (join / leave /
 abort / watchdog / frozen peer / teacher-gone / burst-join / benchmark leave /
-join-during-run, real processes), verify.py.
+join-during-run / kick idle / kick stuck RUN, real processes), verify.py.
 
 ## Remaining Issues
 
