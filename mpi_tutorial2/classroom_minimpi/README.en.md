@@ -418,6 +418,27 @@ roster, removes the rank that stopped answering, and the rest carry on.
 | The world size changes (a class of 3) | In the benchmark, RD (power-of-two only) and Ring cases whose payload is not divisible by 3 print `[skip]` and show `n/a` instead of recording meaningless numbers | No |
 | **The teacher kicks a rank** (idle, menu 10) | That rank gets `C_KICK`, prints `[KICKED]` and exits cleanly; the rest are compacted and re-welcomed | No |
 | **The teacher kicks a rank** (stuck RUN, Ctrl-C -> roster -> kick) | The RUN is aborted at once, the rank is removed from the roster, and the class continues with the rest | No |
+| A rank **errors inside a RUN** (its own crash / bad state) | The RUN is aborted at once (**without waiting for the watchdog**); the rank stays in the class and the next RUN is normal | No |
+| **Leftover data-plane frames** after an aborted RUN | Each RUN starts by clearing the data-plane inbox (`drop_pending`) — otherwise a stale frame is matched by this run's receive and **silently corrupts the result** | No |
+| Teacher stdin: scripted/piped lesson, or two ENTERs in a row | Exactly one owner: interactive prompts win, a teaching pause waits without stealing (it can never swallow input) | No |
+| A student starts the worker with a wrong server address (class not running) | `[JOIN REFUSED] cannot reach the teacher ...` with retries, **never a traceback**; gives up cleanly (exit 3) | No |
+| A typo in an env var (`MINIMPI_BENCH_SIZES=abc,7`) | `[warn] ... ignored abc, 7` and the teacher still starts | No |
+| Ctrl-C at the MENU | Leaves the session and releases every worker (never swallowed) | No |
+| Giving up on a stuck RUN | Ctrl-C -> the roster prompt accepts `q` -> that RUN is aborted, nobody is dropped | No |
+
+#### Known transport anomaly (honest disclosure)
+
+Right after an aborted RUN, and under load, we have seen the teacher report
+`ConnectionResetError` on one rank's control connection while that worker
+process was still alive and simply never received the next RUN. The SYMPTOM is
+contained — the class never wedges: the teacher drops that rank loudly and
+carries on, and the worker notices the broken link (its heartbeat send fails)
+and prints `[CONTROL LOST] ...` and exits, so restarting the worker rejoins.
+We could NOT reproduce the root cause (all-thread stack dumps, socket-close
+tracing and netstat states all showed the worker's connection still
+ESTABLISHED with no close call), so it is recorded here as an intermittent
+transport event.
+
 
 **Concurrency correctness (found the hard way, now fixed)**: joins, leaves and
 runs are handled by different threads, so every control message to a worker is

@@ -39,27 +39,53 @@ from minimpi.collectives_dispatch import make_benchmark_payload  # noqa: E402
 from minimpi.runtime import JoinRefused, VersionMismatch  # noqa: E402
 
 
-def join_world(MPI, server, attempts=60, delay=3.0):
+def _join_budget():
+    """(attempts, delay) for the join retry loop. MINIMPI_JOIN_ATTEMPTS /
+    MINIMPI_JOIN_RETRY_S exist for tests and automation (like the other
+    MINIMPI_* hooks); the classroom uses the defaults."""
+    try:
+        attempts = int(os.environ.get("MINIMPI_JOIN_ATTEMPTS", "") or 60)
+    except ValueError:
+        attempts = 60
+    try:
+        delay = float(os.environ.get("MINIMPI_JOIN_RETRY_S", "") or 3.0)
+    except ValueError:
+        delay = 3.0
+    return max(1, attempts), max(0.0, delay)
+
+
+def join_world(MPI, server, attempts=None, delay=None):
     """Join the class, retrying while the teacher is busy.
 
     A student who starts the worker in the middle of a collective is refused
     ("a collective run is in progress"). Their copy is fine, so instead of
     exiting we wait and try again — by the time that run finishes they join as
     a normal latecomer and take part in the next RUN."""
+    if attempts is None or delay is None:
+        a, d = _join_budget()
+        attempts = attempts or a
+        delay = delay if delay is not None else d
     for i in range(1, attempts + 1):
         try:
             MPI.Init(server=server)
             if i > 1:
                 print("\n[JOIN] reconnected on attempt %d." % i)
             return
-        except JoinRefused as e:
+        except (JoinRefused, OSError) as e:
+            if isinstance(e, OSError):
+                # the teacher is not listening (yet), or the network dropped:
+                # a student must see words, not a traceback
+                why = ("cannot reach the teacher at %s (%s) — is the class "
+                       "running?" % (server, e))
+            else:
+                why = str(e)
             if i >= attempts:
-                print("\n[JOIN REFUSED] %s" % e)
+                print("\n[JOIN REFUSED] %s" % why)
                 print("Giving up after %d attempts — tell the teacher." % i)
-                raise
+                raise JoinRefused(why, getattr(e, "code", "unreachable"))
             if i == 1 or i % 10 == 0:
-                print("\n[JOIN REFUSED] %s" % e)
-                print("[JOIN] retrying in %.0f s (attempt %d/%d); Ctrl-C "
+                print("\n[JOIN REFUSED] %s" % why)
+                print("[JOIN] retrying in %.1f s (attempt %d/%d); Ctrl-C "
                       "stops." % (delay, i, attempts))
             else:
                 print("[JOIN] still waiting for the teacher (attempt %d/%d)..."
@@ -95,6 +121,9 @@ def main():
         run_classroom(comm)
     finally:
         MPI.Finalize()                      # every exit path ends the session
+
+
+_RUNS = [0]           # how many RUNs this worker has entered (test hook)
 
 
 def run_classroom(comm):
@@ -181,6 +210,11 @@ def run_classroom(comm):
                     print("Local data ready.\n\nEntering MPI Barrier...\n"
                           "Waiting for all ranks...")
 
+            # A new RUN starts from a clean data plane: frames left over by a
+            # previous aborted RUN would otherwise be matched by this run's
+            # receives and corrupt the result.
+            classroom.drop_stale_frames()
+
             try:
                 comm.Barrier()           # Start Barrier (both modes): the
                                          # collective only starts when every
@@ -205,15 +239,46 @@ def run_classroom(comm):
 
 
 def run_one_collective(classroom, run, data):
+    """Run one RUN and ALWAYS report the outcome to the teacher.
+
+    Anything that goes wrong — even while merely PREPARING the run, before the
+    collective starts — is reported as a C_DONE error: a rank that stays silent
+    would otherwise leave the whole class waiting until the stall watchdog.
+    """
+    rt = classroom.runtime
+    control = rt.control
+    try:
+        return _run_one_collective(classroom, run, data)
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if getattr(rt, "aborted", False):
+            msg = "ABORTED: %s (%s)" % (rt.abort_reason, msg)
+        try:
+            control.send({"t": P.C_DONE, "rank": rt.rank, "error": msg,
+                          "final": None, "events": 0})
+        except OSError:
+            pass          # teacher is gone: the control reader handles that
+        return None
+
+
+def _run_one_collective(classroom, run, data):
     """Prepare one RUN and execute it on the session runtime.
 
-    Returns the collective's real result (or None on error, which is
-    reported to the teacher). This is where teaching hooks are installed —
-    the algorithm files stay untouched.
+    Returns the collective's real result (or None on error, which is reported
+    to the teacher by the wrapper above). This is where teaching hooks are
+    installed — the algorithm files stay untouched.
     """
     rt = classroom.runtime
     control = rt.control
     params = run.params
+
+    # test-only hook (like MINIMPI_FAKE_VERSION): fail THIS run on one rank so
+    # the classroom's error handling can be exercised end to end
+    _RUNS[0] += 1
+    fail_at = os.environ.get("MINIMPI_FAIL_RUN")
+    if fail_at and _RUNS[0] == int(fail_at):
+        raise RuntimeError("forced failure (test hook MINIMPI_FAIL_RUN=%s)"
+                           % fail_at)
 
     # The welcome only contained the peers joined at that moment; the RUN
     # command carries the full peer table — apply it first.
@@ -257,22 +322,11 @@ def run_one_collective(classroom, run, data):
         rt._on_round = None
         rt._local_ctx = None
 
-    try:
-        result = rt.run_algorithm(params, value=data, barrier=False)
-        final = None if params.get("payload") else _encode(result)
-        control.send({"t": P.C_DONE, "rank": rt.rank, "final": final,
-                      "events": len(rt.events.events)})
-        return result
-    except Exception as e:  # noqa: BLE001
-        msg = str(e)
-        if getattr(rt, "aborted", False):
-            msg = "ABORTED: %s (%s)" % (rt.abort_reason, msg)
-        try:
-            control.send({"t": P.C_DONE, "rank": rt.rank, "error": msg,
-                          "final": None, "events": 0})
-        except OSError:
-            pass          # teacher is gone: the control reader handles that
-        return None
+    result = rt.run_algorithm(params, value=data, barrier=False)
+    final = None if params.get("payload") else _encode(result)
+    control.send({"t": P.C_DONE, "rank": rt.rank, "final": final,
+                  "events": len(rt.events.events)})
+    return result
 
 
 # --------------------------------------------------------------------------

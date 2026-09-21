@@ -373,16 +373,17 @@ class Coordinator:
         print("[ABORT] Collective aborted; the class returns to the menu "
               "(no rank stays blocked).")
 
-    def _on_worker_left(self, rank, who=""):
+    def _on_worker_left(self, rank, who="", why=""):
         """A worker disconnected: compact the roster and keep the class sane."""
         with self.ctrl_lock:
             with self.lock:
                 running = self.run_active
                 self.workers.pop(rank, None)
                 self.epid.pop(rank, None)
-            print("[LEAVE] Rank %d disconnected%s%s"
+            print("[LEAVE] Rank %d disconnected%s%s%s"
                   % (rank, ("  (during a RUN)" if running else ""),
-                     ("  [%s]" % who) if who and who != "?" else ""))
+                     ("  [%s]" % who) if who and who != "?" else "",
+                     ("  (%s)" % why) if why else ""))
             if running:
                 # Mid-RUN departure: the collective can never complete. (The
                 # check is INSIDE the control lock, so the roster can never be
@@ -506,6 +507,7 @@ class Coordinator:
 
     def _handle_worker(self, conn):
         rank = None
+        why = "connection closed by the worker"      # reported in [LEAVE]
         try:
             who = "?"
             try:
@@ -588,8 +590,12 @@ class Coordinator:
                 if cur is None:
                     break
                 self._dispatch(cur, m)
-        except (ConnectionError, OSError):
-            pass
+        except (ConnectionError, OSError) as e:
+            why = type(e).__name__ if not str(e) else "%s: %s" % (
+                type(e).__name__, e)
+        except Exception as e:  # noqa: BLE001
+            # never let an unexpected error hide a departure silently
+            why = "internal error: %r" % e
         finally:
             try:
                 conn.close()
@@ -603,7 +609,7 @@ class Coordinator:
                 cur = next((r for r, c in self.workers.items() if c is conn),
                            None)
             if cur is not None:
-                self._on_worker_left(cur, who)
+                self._on_worker_left(cur, who, why)
 
     def _dispatch(self, rank, m):
         t = m.get("t")
@@ -623,6 +629,10 @@ class Coordinator:
             elif isinstance(val, dict) and "raw" in val:
                 val = base64.b64decode(val["raw"])
             agg.worker_done(rank, value=val, error=m.get("error"))
+            if m.get("error") and self.run_active and not agg.aborted:
+                # This rank cannot finish the RUN, so the others would sit in
+                # a collective until the stall watchdog. End it now instead.
+                self._abort_run("Rank %d failed: %s" % (rank, m.get("error")))
         elif t == P.C_HEARTBEAT:
             self.note_heartbeat(rank)    # roster view: who is really alive
             if agg:
@@ -689,13 +699,21 @@ class Coordinator:
         self._check_ok[0] = set(ok)
         self._check_fail[0] = set(fail)
 
-    def send_to_workers(self, obj):
+    def send_to_workers(self, obj, report=False):
+        """Send one control message to every worker. With report=True the
+        ranks whose connection refused the message are returned: a rank that
+        cannot even receive a RUN is not part of the class any more."""
+        failed = []
         with self.ctrl_lock:
             for rank, conn in list(self.workers.items()):
                 try:
                     P.ctrl_send(conn, obj)
-                except OSError:
-                    pass
+                except OSError as e:
+                    failed.append(rank)
+                    if report:
+                        print("[ROSTER] Rank %d did not accept %s (%s)"
+                              % (rank, obj.get("t"), e))
+        return failed
 
     def run_demo(self, params, mode):
         # Current roster — a RUN always uses the ranks that are here NOW.
@@ -729,13 +747,25 @@ class Coordinator:
         params["value0"] = value0      # rank-0 dispatch arg (local only)
         self.comm0.default_timeout = None      # no deadline on a healthy RUN
         agg.activity_fn = lambda: len(self.events0.events)
+        # rank 0 starts each RUN from a clean data plane too (stale frames from
+        # an aborted RUN would be matched by this run's receives)
+        self.transport.drop_pending()
         try:
             with self.ctrl_lock:
                 # "a run is in flight" and the RUN itself are one step, so a
                 # join or a leave can never rewrite the roster in between.
                 self.run_active = True
-                self.send_to_workers(
-                    {"t": P.C_RUN, "params": _without_value0(params)})
+                failed = self.send_to_workers(
+                    {"t": P.C_RUN, "params": _without_value0(params)},
+                    report=True)
+            if failed:
+                # Those ranks can never take part in this RUN: drop them now
+                # (the normal leave path compacts the roster) instead of
+                # waiting for a collective that can never complete.
+                for r in failed:
+                    self.exclude_suspects[r] = "could not receive the RUN"
+                self._abort_run("rank(s) %s could not be reached for this RUN"
+                                % ", ".join(str(r) for r in failed))
             self._start_rank0(agg, params)
             timeout = _run_timeout()
             while True:
@@ -757,7 +787,10 @@ class Coordinator:
                               "[PAUSE] remove a rank that will not answer and "
                               "the RUN is aborted; the class continues with "
                               "the rest.")
-                        roster_and_kick(self)
+                        try:
+                            roster_and_kick(self, allow_quit=True)
+                        except KeyboardInterrupt:
+                            print("\n(kick prompt cancelled)")
                     if not self.roster_snapshot()[1]:
                         finished = False
                         break
@@ -1261,7 +1294,10 @@ def _read_line_loop(coord, epoch, interactive):
             print("\n[PAUSE] the RUN is still waiting.\n"
                   "[PAUSE] remove a rank that will not answer and the RUN is "
                   "aborted; the class continues with the rest.")
-            roster_and_kick(coord)
+            try:
+                roster_and_kick(coord, allow_quit=True)
+            except KeyboardInterrupt:
+                print("\n(kick prompt cancelled)")
             return ""
         if not interactive and _owner_active():
             # a menu / roster prompt owns the keyboard: keep waiting, do not
@@ -1271,13 +1307,18 @@ def _read_line_loop(coord, epoch, interactive):
         try:
             line = _STDIN_Q.get(timeout=0.2 if interactive else 0.05)
         except KeyboardInterrupt:
+            if coord is None:
+                # a menu / roster prompt: Ctrl-C means "leave the session"
+                raise
             # Ctrl-C must never kill rank 0 (that would break the class). While
             # a RUN is in flight it opens the teacher tool instead: who is in
             # the class, and remove a rank that will not answer.
             print("\n[PAUSE] interrupted. The RUN keeps waiting; no rank was "
                   "dropped.")
-            if coord is not None:
-                roster_and_kick(coord)
+            try:
+                roster_and_kick(coord, allow_quit=True)
+            except KeyboardInterrupt:
+                print("\n(kick prompt cancelled)")
             return ""
         except queue.Empty:
             if coord is None:
@@ -1313,6 +1354,10 @@ def _run_timeout():
 def run_demo(coord, algo, mode, payload=0, vector_len=0, show=True,
              value0=1, silent=False, kind=None):
     n = coord.active_size()          # THIS run's world size (dynamic roster)
+    if algo == "ping_pong" and n < 2:
+        print("[skip] %s needs at least 2 ranks (World Size %d — every "
+              "student has left, only Rank 0 is here)" % (algo, n))
+        return None
     if algo == "recursive_doubling_allreduce" and not _pow2(n):
         print("[skip] %s requires a power-of-two world size (got %d)" %
               (algo, n))
@@ -1389,10 +1434,32 @@ BENCH_ALGORITHMS = ["naive_allreduce", "recursive_doubling_allreduce",
 #   default 16 B .. 4 MB (16 MB removed so a real-LAN classroom demo stays
 #   short). Override with MINIMPI_BENCH_SIZES="16,1024,16384" etc.
 def _bench_sizes():
+    """Benchmark sizes (bytes per rank). A typo in MINIMPI_BENCH_SIZES must
+    never kill the teacher, and a nonsense size must never be benchmarked:
+    unparsable / below one int32 / not a multiple of 4 bytes is skipped with a
+    warning, and if nothing is left the defaults are used."""
+    default = [16, 1024, 16 * 1024, 256 * 1024, 4 * 1024 * 1024]
     raw = os.environ.get("MINIMPI_BENCH_SIZES", "")
-    if raw.strip():
-        return [int(x.strip()) for x in raw.split(",") if x.strip()]
-    return [16, 1024, 16 * 1024, 256 * 1024, 4 * 1024 * 1024]
+    if not raw.strip():
+        return default
+    keep, bad = [], []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            v = int(part)
+        except ValueError:
+            bad.append(part)
+            continue
+        if v < P.ELEMENT_BYTES or v % P.ELEMENT_BYTES:
+            bad.append(part)
+            continue
+        keep.append(v)
+    if bad:
+        print("[warn] MINIMPI_BENCH_SIZES ignored %s (need multiples of %d "
+              "bytes)" % (", ".join(bad), P.ELEMENT_BYTES))
+    return keep or default
 
 BENCH_SIZES = _bench_sizes()
 BENCH_RUNS = 3
@@ -1599,7 +1666,7 @@ MENU = [
 ]
 
 
-def roster_and_kick(coord):
+def roster_and_kick(coord, allow_quit=False):
     """Teacher tool: show who is really in the class, and remove somebody.
 
     Joins and departures are automatic and live; this is for the cases the
@@ -1628,9 +1695,16 @@ def roster_and_kick(coord):
              "   [a RUN is in flight]" if coord.run_active else ""))
     print("[ROSTER] joining and leaving are automatic — this tool is for "
           "decisions only the teacher can make.")
-    raw = read_line("\nKick which rank? (number, ENTER = cancel)\n> ").strip()
+    hint = "\nKick which rank? (number, ENTER = cancel"
+    if allow_quit and coord.run_active:
+        hint += ", q = abort this RUN and go back to the menu"
+    raw = read_line(hint + ")\n> ").strip().lower()
     if not raw:
         print("(cancelled)")
+        return
+    if raw in ("q", "quit", "abort") and allow_quit:
+        coord._abort_run("the teacher aborted the RUN (Ctrl-C at the pause)")
+        print("[PAUSE] RUN aborted — back to the menu.")
         return
     if not raw.isdigit() or int(raw) not in ranks:
         print("[KICK] %r is not an active student rank." % raw)

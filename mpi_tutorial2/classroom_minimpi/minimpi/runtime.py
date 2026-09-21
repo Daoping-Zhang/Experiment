@@ -123,6 +123,11 @@ class MiniRuntime:
         except Exception:  # noqa: BLE001
             pass
 
+    def drop_stale_frames(self):
+        """Between RUNs: forget data-plane frames left by the previous
+        (possibly aborted) RUN, so they can never be matched by this one."""
+        return self.transport.drop_pending()
+
     def abort_run(self, reason=""):
         """A rank left / the teacher cancelled this RUN: stop blocking forever.
 

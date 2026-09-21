@@ -318,6 +318,16 @@ Kick Rank 2? [y/N] y
 也就是说：**卡住的课堂不需要等任何超时**——老师看一眼名单、踢掉不回应的那一位，剩下的人马上继续。
 （`MINIMPI_RUN_TIMEOUT` 的停车看门狗退化成"老师不在场时的兜底"。）
 
+#### 已知的传输层异常（诚实声明）
+
+在一次 RUN 被 abort 之后，压力下偶发过：teacher 侧看到某个 rank 的控制连接
+`ConnectionResetError`（RST），而那个 worker 进程其实还活着、只是没再收到 RUN。
+现象被围堵住（不会卡课）：teacher 会明确地 `[LEAVE]` 掉这个 rank 并继续上课；
+worker 端一旦发现控制链路断了（心跳发送失败）会打印 `[CONTROL LOST] ...` 并退出，
+学生重启 worker 即重新加入。**我们没能复现出根因**（用全线程栈、socket close 追踪、
+netstat 状态都查过：worker 侧连接看起来仍然 ESTABLISHED 且没有 close 调用），
+所以按"传输层偶发"记录在此；它不会让课堂卡死，也不需要老师额外操作。
+
 #### 逐流程审计：worker 在哪个时刻退出会怎样
 
 | Worker 退出的时刻 | 行为 | 课堂是否卡住 |
@@ -337,6 +347,13 @@ Kick Rank 2? [y/N] y
 | 世界人数变了（3 人班） | Benchmark 里 RD（需要 2 的幂）与"载荷不能被 3 整除"的 Ring 会打印 `[skip]`，表里显示 `n/a`，不再记录无意义的数字 | 不会 |
 | **老师主动踢人**（空闲时，菜单 10） | 该 rank 收到 `C_KICK` 并打印 `[KICKED]` 后干净退出；其余 rank 压缩 + 重新 welcome | 不会 |
 | **老师主动踢人**（RUN 卡住时，Ctrl-C → 名单 → 踢） | 立刻 abort 这个 RUN，踢掉的 rank 从名单移除，课堂用剩下的人继续 | 不会 |
+| 一个 rank 在 RUN 中**报错**（自己崩/数据异常） | 立刻 abort 这个 RUN（**不等看门狗**），该 rank 留在班里，下一次 RUN 照常 | 不会 |
+| 上一轮 RUN 被 abort 后：**残留数据帧** | 每个 RUN 开始前清空数据面 inbox（`drop_pending`），否则旧帧会被这一轮的 recv 匹配到、**悄悄算错结果** | 不会 |
+| 老师端 stdin：脚本/管道上课、连按两次 ENTER | stdin 只有一个 owner：菜单提示优先，教学暂停只等不抢（不会吞掉输入） | 不会 |
+| 学生用错误的 server 地址启动（老师没开/已下课） | 打印 `[JOIN REFUSED] cannot reach the teacher ...` 并重试，**不再抛 traceback**；重试用尽后干净退出（exit 3） | 不会 |
+| 环境变量写错（`MINIMPI_BENCH_SIZES=abc,7`） | 打印 `[warn] ... ignored abc, 7` 并跳过，teacher **不会因此崩掉** | 不会 |
+| 老师端 Ctrl-C（在菜单里） | 正常退出并释放所有 worker（不会被吞掉） | 不会 |
+| 课堂卡住时想放弃这个 RUN | Ctrl-C → 名单提示里输 `q` → abort 该 RUN 回菜单，**不剔除任何人** | 不会 |
 
 **并发正确性（踩过的坑，已修）**：加入/退出/RUN 分别由不同线程处理，所以控制面发送被
 **串行化**（`Coordinator.ctrl_lock`）——否则两次并发的 `welcome` 会在同一个 socket 上交错，

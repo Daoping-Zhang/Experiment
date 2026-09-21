@@ -162,7 +162,35 @@ world size is rank 0 + the workers that are here now, and it may differ.
     wedged class is fixed in seconds by the teacher instead of waiting for any
     timeout. Exactly one thread owns stdin at a time: while a pause waits for
     ENTER the pause serves the Ctrl-C request, otherwise the main thread does.
-* New automated suite `tests/test_robustness.py`: 65 checks over real
+* Second robustness audit (no teacher watching, nobody acting):
+  * a rank that ERRORS inside a RUN now aborts that RUN immediately (the
+    others used to sit in a collective until the stall watchdog);
+  * a RUN starts from a clean data plane (`drop_pending`): frames left by an
+    aborted RUN were matched by the next run's receive and SILENTLY corrupted
+    its result (observed: a follow-up AllReduce returned 5 instead of 6);
+  * a worker whose control link to the teacher breaks now says
+    `[CONTROL LOST] ...` and leaves the session instead of idling forever
+    (the reader thread may be parked in a receive that never returns);
+  * a rank that cannot even accept a RUN is dropped explicitly by the teacher
+    (never a silent half-participant);
+  * every RUN outcome is reported: an exception while PREPARING a run used to
+    leave the class waiting with no C_DONE at all;
+  * teacher input: `MINIMPI_BENCH_SIZES` typos no longer crash the teacher
+    (bad sizes are skipped with a warning, defaults kept), `ping_pong` at
+    World Size 1 is skipped with a clear message instead of a ValueError,
+    Ctrl-C at the menu leaves the session (it was swallowed), and the
+    interrupt prompt accepts `q` to abort a stuck RUN without dropping anyone;
+  * a worker started with no teacher running retries with
+    `[JOIN REFUSED] cannot reach the teacher ...` and exits 3 — no traceback
+    (MINIMPI_JOIN_ATTEMPTS / MINIMPI_JOIN_RETRY_S are test/automation knobs).
+* KNOWN transport anomaly (not root-caused, symptom contained): right after an
+  aborted RUN the teacher can see a spurious ConnectionResetError on one rank's
+  control connection while that worker is alive and idle. The class never
+  wedges (the rank is dropped loudly, the worker exits with [CONTROL LOST] and
+  can rejoin). All-thread dumps, socket-close tracing and netstat snapshots did
+  not expose a close path, so scenario O asserts the ROBUST property (the class
+  stays usable, no watchdog wait) rather than one specific surviving rank.
+* New automated suite `tests/test_robustness.py`: 81 checks over real
   teacher/worker processes — leave while idle, late join, leave during a run
   (no hang, menu still usable, next RUN correct), watchdog, teacher
   disappears, and a BURST join (three students join at once; every rank must
@@ -217,7 +245,9 @@ test_final_behavior (T-Z: RD topology/correctness, LOCAL TIMELINE semantics,
 synchronization window, benchmark one-input/no-zero-data-size/median-summary),
 test_version_guard (join-time version refusal), test_robustness (join / leave /
 abort / watchdog / frozen peer / teacher-gone / burst-join / benchmark leave /
-join-during-run / kick idle / kick stuck RUN, real processes), verify.py.
+join-during-run / kick idle / kick stuck RUN / rank error / menu Ctrl-C /
+unreachable teacher / bad bench env / quit stuck RUN, real processes),
+verify.py.
 
 ## Remaining Issues
 

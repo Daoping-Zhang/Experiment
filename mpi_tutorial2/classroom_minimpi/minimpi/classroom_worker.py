@@ -103,6 +103,11 @@ class ClassroomWorker:
         if self._rt is not None:
             self._rt.clear_abort()
 
+    def drop_stale_frames(self):
+        """Forget frames left over by the previous RUN (see transport)."""
+        if self._rt is not None:
+            self._rt.drop_stale_frames()
+
     def benchmark_value(self):
         """Value typed once at Performance Benchmark setup; None outside a
         benchmark session."""
@@ -140,7 +145,16 @@ class ClassroomWorker:
             try:
                 self._rt.control.send({"t": P.C_HEARTBEAT,
                                        "rank": self._rt.rank})
-            except OSError:
+            except OSError as e:
+                # The link to the teacher is gone. The control reader may be
+                # parked in a receive that never returns, so THIS is where we
+                # notice: never let the worker sit idle in a session that no
+                # longer exists — end it so the student can rejoin.
+                print("\n[CONTROL LOST] %s" % e)
+                print("[CONTROL LOST] the teacher's connection is gone — "
+                      "leaving the session (restart to join again).")
+                self._rt.abort_run("the teacher's control connection was lost")
+                self._q.put(None)          # main loop: exit cleanly
                 return
             time.sleep(P.HEARTBEAT_S)
 

@@ -49,6 +49,22 @@ class PeerTransport:
         self.rank = rank
         self.peers = dict(peers)   # rank -> (host, port)
 
+    def drop_pending(self):
+        """Throw away queued frames WITHOUT touching the sockets.
+
+        A RUN that was aborted (a rank left, a rank failed, the teacher
+        cancelled) can leave frames in flight — a partial payload, a barrier
+        token, an answer nobody read. Collective tags repeat from one RUN to
+        the next, so such a frame would be matched by the NEXT run's receive
+        and silently corrupt its result. Called between RUNs, when the data
+        plane is supposed to be idle.
+        """
+        with self._inbox_cv:
+            n = len(self._inbox)
+            self._inbox = []
+            self._inbox_cv.notify_all()
+        return n
+
     def reset_peers(self, rank, peers):
         """Adopt a NEW roster (somebody joined / left and ranks moved).
 
