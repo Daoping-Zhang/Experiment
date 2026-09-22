@@ -182,7 +182,8 @@ class ClassroomWorker:
                     self._q.put(RunSpec(params={"kind": "roster",
                                                 "rank": m.get("rank"),
                                                 "size": m.get("size"),
-                                                "peers": m.get("peers", {})}))
+                                                "peers": m.get("peers", {}),
+                                                "why": m.get("why", "")}))
                 elif t == P.C_KICK:
                     # the teacher removed this rank: stop the heartbeat, end
                     # any RUN we are stuck in and shut down cleanly

@@ -320,13 +320,25 @@ class Coordinator:
         else:
             self.transport.set_peers(0, table)
 
-    def _welcome_msg(self, rank, size):
+    def _welcome_msg(self, rank, size, why=""):
         # Same message type the JOIN path uses: a worker re-reads it at any
-        # time to adopt a new rank / size / peer table.
-        return {"t": P.C_WELCOME, "rank": rank, "size": size,
-                "peers": self.peers,
-                "version": P.MINIMPI_VERSION,
-                "protocol": P.PROTOCOL_VERSION}
+        # time to adopt a new rank / size / peer table. `why` tells the student
+        # WHY the roster changed (and that renumbering is deliberate).
+        msg = {"t": P.C_WELCOME, "rank": rank, "size": size,
+               "peers": self.peers,
+               "version": P.MINIMPI_VERSION,
+               "protocol": P.PROTOCOL_VERSION}
+        if why:
+            msg["why"] = why
+        return msg
+
+    def student_label(self, rank):
+        """`ip:port` of a rank: the identity that does NOT change when ranks
+        are renumbered."""
+        ep = self.epid.get(rank)
+        if not ep:
+            return "?"
+        return "%s:%s" % (ep.get("host", "?"), ep.get("port", "?"))
 
     def _apply_local_size(self, n=None):
         """Rank 0 (this process) adopts the current active world size.
@@ -344,26 +356,39 @@ class Coordinator:
             cw.rank = 0
         return n
 
-    def _broadcast_roster(self, size, reason, skip=None):
-        """Tell the joined workers the current rank/size/peer table.
+    def _broadcast_roster(self, size, reason, skip=None, moves=None, why=""):
+        """Send every worker the current rank/size/peer table.
 
-        `skip` is the rank that just received its welcome (a new joiner), so
-        the log shows one line per actually-updated worker."""
+        Log order is CAUSE FIRST, then the effect, because the other order
+        reads like a bug ("Rank 1 re-welcomed ... Rank 2 left"):
+
+            [LEAVE] Rank 2 (10.0.0.7:51239) disconnected
+            [ROSTER] Rank 2 (10.0.0.7:51239) left -> world size 3 (2 student rank(s))
+            [ROSTER]     Rank 3 -> Rank 2  (10.0.0.9:51241)
+
+        Everybody receives the new peer table (that IS the re-welcome); only
+        the ranks whose NUMBER changed are named. A rank is this RUN's
+        position, the `ip:port` is the student.
+        """
+        moves = moves or []
         with self.ctrl_lock:
             with self.lock:
-                targets = [(r, c, self._welcome_msg(r, size))
+                targets = [(r, c, self._welcome_msg(r, size, why))
                            for r, c in sorted(self.workers.items())
                            if r != skip]
+            if reason:
+                print("[ROSTER] %s -> world size %d (%d student rank(s))"
+                      % (reason, size, size - 1))
+            for old_rank, new_rank in moves:      # moves is (old, new)
+                print("[ROSTER]     Rank %d -> Rank %d  (%s)"
+                      % (old_rank, new_rank, self.student_label(new_rank)))
+            if reason and not moves and "left" in reason:
+                print("[ROSTER]     (no rank had to be renumbered)")
             for rank, conn, msg in targets:
                 try:
                     P.ctrl_send(conn, msg)
-                    print("[ROSTER] Rank %d re-welcomed (world size is now %d)"
-                          % (rank, size))
                 except OSError:
                     pass
-        if reason:
-            print("[ROSTER] %s  ->  World Size %d (%d student ranks)"
-                  % (reason, size, size - 1))
 
     def _abort_run(self, reason, clean=True):
         """Unblock a RUN that can no longer finish.
@@ -408,13 +433,12 @@ class Coordinator:
                 # Remaining workers are re-welcomed once the RUN has unwound
                 # (see _sync_roster_after_run).
                 return
-            size = self._apply_local_size()
             with self.lock:
                 moves = self._rebuild_roster_locked()
-            if moves:
-                print("[ROSTER] rank compaction: %s"
-                      % ", ".join("%d -> %d" % mv for mv in moves))
-            self._broadcast_roster(size, "Rank %d left" % rank)
+            size = self._apply_local_size()
+            self._broadcast_roster(
+                size, "Rank %d (%s) left" % (rank, who or "?"), moves=moves,
+                why="a student left and the ranks were renumbered")
 
     def kick_rank(self, rank, why=""):
         """Remove one rank from the class ON PURPOSE.
@@ -498,13 +522,13 @@ class Coordinator:
         if not getattr(self, "roster_dirty", False):
             return
         self.roster_dirty = False
-        size = self._apply_local_size()
         with self.lock:
             moves = self._rebuild_roster_locked()
-        if moves:
-            print("[ROSTER] rank compaction: %s"
-                  % ", ".join("%d -> %d" % mv for mv in moves))
-        self._broadcast_roster(size, "roster updated")
+        size = self._apply_local_size()
+        self._broadcast_roster(
+            size, "a rank left during the last RUN", moves=moves,
+            why="a student left during the last RUN and the ranks were "
+                "renumbered")
 
     def _accept_loop(self):
         while not self.closed:
@@ -578,20 +602,23 @@ class Coordinator:
                     moves = self._rebuild_roster_locked()
                     ready = len(self.workers) + 1
                     total = self.size
-                    welcome = self._welcome_msg(rank, ready)
+                    welcome = self._welcome_msg(
+                        rank, ready, "you joined the class")
                     self._apply_local_size(ready)
-                if moves:
-                    print("[ROSTER] rank compaction: %s"
-                          % ", ".join("%d -> %d" % mv for mv in moves))
                 P.ctrl_send(conn, welcome)
                 print("[JOIN] %s -> Rank %d  (data plane %s:%s)  "
                       "[%d/%d ranks ready%s]"
                       % (who, rank, msg.get("host"), msg.get("port"),
                          ready, total,
                          "" if ready == total else " - capacity"))
-                # Everybody else (including ranks that just moved down) adopts
-                # the new roster; the class keeps working without a restart.
-                self._broadcast_roster(ready, None, skip=rank)
+                # Everybody else adopts the new roster (new peer table); only
+                # the ranks that really moved are named in the log.
+                self._broadcast_roster(
+                    ready,
+                    "Rank %d (%s) joined" % (rank, msg.get("host")),
+                    skip=rank, moves=moves,
+                    why=("a student joined and the ranks were renumbered"
+                         if moves else "a student joined the class"))
             while not self.closed:
                 m = P.ctrl_recv_line(conn)
                 if m is None:            # peer went away

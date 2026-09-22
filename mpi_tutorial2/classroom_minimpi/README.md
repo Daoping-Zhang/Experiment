@@ -188,11 +188,12 @@ python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
 #   --size 是**容量**（最多几个 rank），不是"必须到齐几个"。
 #   交互课堂只要 ≥2 个 rank 且不再有人加入（静默 3 秒）就开始上课；
 #   迟到的同学随时还能加入，中途退出的同学也不会让课堂卡住。
-#   每个学生加入/退出/重排都会打印：
+#   每个学生加入/退出/重排都会打印（原因在前、结果在后，并带上是谁）：
 #   [JOIN] 192.168.1.45:51234 -> Rank 1  (data plane ...)  [2/4 ranks ready - capacity]
-#   [LEAVE] Rank 2 disconnected
-#   [ROSTER] rank compaction: 3 -> 2
-#   [ROSTER] Rank 2 re-welcomed (world size is now 2)
+#   [ROSTER] Rank 1 (192.168.1.45) joined -> world size 2 (1 student rank(s))
+#   [LEAVE] Rank 2 disconnected  [192.168.1.46:51239]  (ConnectionError: ...)
+#   [ROSTER] Rank 2 (192.168.1.46:51239) left -> world size 3 (2 student rank(s))
+#   [ROSTER]     Rank 3 -> Rank 2  (192.168.1.47:51241)
 #   失败会打印 REJECTED 原因（版本不一致 / world 已满 / 正在跑）
 # 学生一键启动（推荐）：Mac 双击 scripts/start_worker_mac.command；
 #   Windows 双击 scripts/start_worker_windows.bat —— 输入老师 IP:Port 即连接。
@@ -253,8 +254,8 @@ worker : [VERSION MISMATCH] ... Please update this student copy (git pull /
 
 | 事件 | Teacher 行为 | 学生看到 |
 | --- | --- | --- |
-| 加入（含迟到） | 分配**最小空闲 rank**，world size +1，打印 `[JOIN]`；给其它 rank 重发 `C_WELCOME` 更新 peers | 新同学打印 `[ROSTER] You are now Rank r / n` |
-| 空闲时退出 | 打印 `[LEAVE]`；**rank 压缩成连续的 1..N-1**，打印 `[ROSTER] rank compaction` 并重新 welcome 每个 rank | 剩余同学看到自己 rank 变了（数据面 TCP 连接会重建，不需要重启） |
+| 加入（含迟到） | 分配**最小空闲 rank**，world size +1，打印 `[JOIN]`；给所有人重发 `C_WELCOME`（新 peers 表） | 新同学打印 `[ROSTER] world size is now n, you are Rank r` |
+| 空闲时退出 | 打印 `[LEAVE]`（带 ip:port）；**rank 压缩成连续的 1..N-1**并打印 `Rank 3 -> Rank 2 (ip:port)`，随后给所有人发新 peers 表 | 被重排的同学打印 `[ROSTER] world size is now n, you are Rank r  (you were Rank s)` + 原因 |
 | 正在跑时退出 | 打印 `[LEAVE] Rank r disconnected (during a RUN)`，立刻 `[ABORT]`：给剩余 rank 发 `C_ABORT`，**取消所有正在阻塞的 recv** | 该 RUN 打印 `[ABORT] this RUN ended early: ...`，随后回到等待下一次 RUN（进程不退出） |
 | 某个 rank 卡死（进程还活着但完全不动） | **停车看门狗**：超过 `MINIMPI_RUN_TIMEOUT`（默认 600 s，按"无任何进展"计）无进展就 abort，并**点名 + 剔除**那个不再发心跳的 rank（`[ROSTER] excluding Rank r`），课堂用剩下的人继续 | 该 RUN abort；被剔除的同学唤醒后会看到控制连接断开并退出，重启 worker 即可重新加入 |
 | 学生机器"消失"（合盖/拔网线，不发 FIN） | 数据面 + 控制面都开了 **TCP keepalive**（idle 8 s + 2 s×3 次探测），于是它会像正常掉线一样被 `[LEAVE]` 发现 | 同上（该 rank 被正常移除） |
@@ -269,6 +270,29 @@ worker : [VERSION MISMATCH] ... Please update this student copy (git pull /
 - 每次成员变化后数据面 peers 会重建（按 rank 缓存的出站连接必须失效），否则压缩后的
   rank 会复用到别人的连接——这是最容易出错的地方，`PeerTransport.reset_peers()` 专门处理它。
 - 这些场景都有自动化验收：`python3 tests/test_robustness.py`（**54 项检查，全部真实进程**）。
+
+#### rank 数字 vs 学生身份（为什么有人退出后 rank 会变）
+
+**rank 不是学生编号，而是"这次 collective 里的位置"**。MPI 里 `MPI_COMM_WORLD` 的
+size 就是参与者个数、rank 是 0..N-1；我们的 collective（Ring 的 `(r+1)%P`、RD 的
+`r^k`、Tree 的 `r+2^k`、Barrier 从 `range(1,size)` 收 token）全都依赖这个前提。
+所以有人退出时，必须让世界重新变成**连续的 0..N-1**——也就是把后面的人往前挪
+（"压缩"），而不是留一个洞：
+
+```
+[LEAVE] Rank 2 disconnected  [192.168.1.46:51239]  (ConnectionError: ...)
+[ROSTER] Rank 2 (192.168.1.46:51239) left -> world size 3 (2 student rank(s))
+[ROSTER]     Rank 3 -> Rank 2  (192.168.1.47:51241)      ← 谁变成了几号，看得见
+```
+
+- **身份用什么认？** 用 `ip:port`（数据面地址）——它永远不变。日志里 JOIN/LEAVE/重排
+  都会打印它，所以"到底是谁走了"不会因为 rank 变化而含糊。
+- **空出来的号会补上吗？** 会：下一个加入的同学拿到的就是刚空出来的那个号
+  （因为压缩后最大的空缺号就是空位）。
+- **学生端也会有解释**：`[ROSTER] world size is now 3, you are Rank 2 (you were Rank 3)`
+  + `a student left and the ranks were renumbered`，学生知道是别人退出导致自己换号。
+- 想彻底不换号？那就得让世界留洞（sparse ranks），Ring/RD/Tree/Barrier 全部要重写，
+  而且和真实 MPI 的 `COMM_WORLD` 语义不再一致——这是本教程**故意不做**的事。
 
 #### 老师端动态管理：名单 + 踢人（菜单 10）
 

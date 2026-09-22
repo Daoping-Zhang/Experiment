@@ -139,11 +139,20 @@ def run_classroom(comm):
             # Teacher control messages that are NOT a collective run: roster
             # changes (somebody joined/left) and aborts.
             if run.kind == "roster":
-                classroom.apply_roster(run.params.get("rank"),
-                                       run.params.get("size"),
+                was = comm.Get_rank()
+                new_rank = run.params.get("rank")
+                new_size = run.params.get("size")
+                why = run.params.get("why") or "the class changed"
+                classroom.apply_roster(new_rank, new_size,
                                        run.params.get("peers", {}))
-                print("\n[ROSTER] You are now Rank %s / %s  (world updated)"
-                      % (run.params.get("rank"), run.params.get("size")))
+                # Say WHY and what changed: a rank number is this RUN's
+                # position in the class, not the student's identity.
+                changed = str(new_rank) != str(was)
+                print("\n[ROSTER] world size is now %s, you are Rank %s%s"
+                      % (new_size, new_rank,
+                         "  (you were Rank %s)" % was if changed
+                         else "  (unchanged)"))
+                print("[ROSTER] %s" % why)
                 continue
 
             if run.kind == "kicked":

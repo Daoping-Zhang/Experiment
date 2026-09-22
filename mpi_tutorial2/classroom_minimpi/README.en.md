@@ -252,11 +252,13 @@ python3 teacher.py --size 4 --host 0.0.0.0 --port 9000
 #   An interactive lesson starts once >= 2 ranks are here and nobody is still
 #   joining (3 s of quiet); late students can still join, and a student who
 #   leaves never wedges the class.
-#   Joins / leaves / rank changes are logged, e.g.
+#   Joins / leaves / renumbering are logged (cause first, then effect, and
+#   always naming WHO by ip:port):
 #   [JOIN] 192.168.1.45:51234 -> Rank 1  (data plane ...)  [2/4 ranks ready - capacity]
-#   [LEAVE] Rank 2 disconnected
-#   [ROSTER] rank compaction: 3 -> 2
-#   [ROSTER] Rank 2 re-welcomed (world size is now 2)
+#   [ROSTER] Rank 1 (192.168.1.45) joined -> world size 2 (1 student rank(s))
+#   [LEAVE] Rank 2 disconnected  [192.168.1.46:51239]  (ConnectionError: ...)
+#   [ROSTER] Rank 2 (192.168.1.46:51239) left -> world size 3 (2 student rank(s))
+#   [ROSTER]     Rank 3 -> Rank 2  (192.168.1.47:51241)
 #   failures print REJECTED (version mismatch / world full / run in progress)
 # One-click student launcher (recommended): double-click
 #   scripts/start_worker_mac.command  (macOS)
@@ -324,8 +326,8 @@ teacher opened) from **active size** (rank 0 + the workers that are here now):
 
 | Event | Teacher behaviour | What students see |
 | --- | --- | --- |
-| Join (including late) | Assigns the **lowest free rank**, world size +1, logs `[JOIN]`; re-sends `C_WELCOME` to the others with the new peers | The newcomer prints `[ROSTER] You are now Rank r / n` |
-| Leave while idle | Logs `[LEAVE]`; **compacts ranks to a contiguous 1..N-1**, logs `[ROSTER] rank compaction` and re-welcomes every worker | Remaining students see their rank change (data-plane TCP connections are rebuilt; no restart) |
+| Join (including late) | Assigns the **lowest free rank**, world size +1, logs `[JOIN]`; re-sends `C_WELCOME` (new peer table) to everyone | The newcomer prints `[ROSTER] world size is now n, you are Rank r` |
+| Leave while idle | Logs `[LEAVE]` with its ip:port; **compacts ranks to a contiguous 1..N-1**, prints `Rank 3 -> Rank 2 (ip:port)`, then sends the new peer table | The moved student prints `[ROSTER] world size is now n, you are Rank r  (you were Rank s)` plus the reason |
 | Leave DURING a run | Logs `[LEAVE] Rank r disconnected (during a RUN)` and immediately `[ABORT]`s: sends `C_ABORT`, **cancels every blocked recv** | That RUN prints `[ABORT] this RUN ended early: ...`, then the worker goes back to waiting for the next RUN (the process stays alive) |
 | A rank stalls (process alive but doing nothing) | **Stall watchdog**: no progress at all for `MINIMPI_RUN_TIMEOUT` (default 600 s) aborts the RUN, NAMES the rank that stopped heartbeating and DROPS it (`[ROSTER] excluding Rank r`); the class continues with the rest | That RUN aborts; the dropped student's worker sees its control link close and exits — restart the worker to rejoin |
 | A student machine vanishes (lid closed / cable pulled, no FIN) | **TCP keepalive** on the control AND data sockets (8 s idle + 3 probes 2 s apart) turns it into an ordinary disconnect, so the normal `[LEAVE]` path runs | Same (the rank is removed normally) |
@@ -345,6 +347,32 @@ Key points:
   that; it is the easiest thing to get wrong.
 - All of this is covered by an automated test:
   `python3 tests/test_robustness.py` (**54 checks, real processes**).
+
+#### Rank number vs student identity (why ranks change when somebody leaves)
+
+A **rank is a position in this collective, not a student ID**. In MPI the size of
+`MPI_COMM_WORLD` is the number of participants and ranks are 0..N-1, and every
+collective here relies on exactly that (Ring's `(r+1)%P`, RD's `r^k`, Tree's
+`r+2^k`, the barrier gathering from `range(1, size)`). When somebody leaves the
+world therefore has to become contiguous 0..N-1 again — later ranks move down —
+instead of keeping a hole:
+
+```
+[LEAVE] Rank 2 disconnected  [192.168.1.46:51239]  (ConnectionError: ...)
+[ROSTER] Rank 2 (192.168.1.46:51239) left -> world size 3 (2 student rank(s))
+[ROSTER]     Rank 3 -> Rank 2  (192.168.1.47:51241)     <- who is what now
+```
+
+- **Identity** is the `ip:port` (data-plane endpoint), which never changes: the
+  JOIN / LEAVE / renumbering lines all print it, so "who left?" is never
+  ambiguous even when numbers move.
+- **Is the freed number refilled?** Yes — the next joiner gets exactly the number
+  that was vacated (after compaction the highest hole is the free one).
+- **Students are told too**: `[ROSTER] world size is now 3, you are Rank 2 (you
+  were Rank 3)` + `a student left and the ranks were renumbered`.
+- Stable numbers with a hole would mean sparse ranks: Ring/RD/Tree/Barrier would
+  all need rewriting and it would no longer match real `COMM_WORLD` semantics —
+  deliberately out of scope for this tutorial.
 
 #### Teacher-side roster and kick (menu 10)
 

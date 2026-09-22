@@ -209,8 +209,9 @@ def scenario_leave_when_idle(tmp):
         kill(c.workers["w2"])
         check("A idle leave: teacher notices the departure",
               c.wait_log(r"\[LEAVE\] Rank 2 disconnected", timeout=25))
-        check("A idle leave: remaining worker is re-welcomed",
-              c.wait_log(r"\[ROSTER\] Rank 1 re-welcomed", timeout=25))
+        check("A idle leave: the class is told who left and what moved",
+              c.wait_log(r"\[ROSTER\] Rank 2 \(127\.0\.0\.1:\d+\) left -> "
+                         r"world size 2", timeout=25))
         # the RUN must use the roster that is here NOW (rank 0 + w1 = 2)
         c.menu("3\n16\n2\n1\n")             # naive_allreduce / perf / value 1
         check("A idle leave: following RUN uses World Size 2",
@@ -365,9 +366,10 @@ def scenario_burst_join(tmp):
         ranks, sizes = [], []
         for tag in ("w1", "w2", "w3"):
             log = c.log(tag)
-            last = re.findall(r"\[ROSTER\] You are now Rank (\d+) / (\d+)", log)
+            last = re.findall(
+                r"\[ROSTER\] world size is now (\d+), you are Rank (\d+)", log)
             if last:
-                r, n = last[-1]
+                n, r = last[-1]          # pattern is (size, rank)
             else:                            # never re-welcomed: startup rank
                 m = re.search(r"Rank: (\d+) / (\d+)", log)
                 if m is None:
@@ -450,8 +452,8 @@ def scenario_back_to_back_leaves(tmp):
         # (it was compacted from 3 to 2 before its departure was noticed)
         check("H back-to-back leaves: both departures are seen",
               c.wait_count(r"\[LEAVE\] Rank \d+ disconnected", 2, timeout=30))
-        if not c.wait_log(r"\[ROSTER\] Rank \d+ left  ->  World Size 2 "
-                          r"\(1 student ranks\)", timeout=25):
+        if not c.wait_log(r"\[ROSTER\] Rank \d+ \(127\.0\.0\.1:\d+\) left -> "
+                          r"world size 2 \(1 student rank\(s\)\)", timeout=25):
             check("H back-to-back leaves: roster is compacted to 2", False)
             return
         check("H back-to-back leaves: roster is compacted to 2", True)
@@ -464,8 +466,8 @@ def scenario_back_to_back_leaves(tmp):
         kill(c.workers["w1"])
         check("H back-to-back leaves: last departure is seen",
               c.wait_log(r"\[LEAVE\] Rank 1 disconnected", timeout=25))
-        if not c.wait_log(r"\[ROSTER\] Rank \d+ left  ->  World Size 1 "
-                          r"\(0 student ranks\)", timeout=25):
+        if not c.wait_log(r"\[ROSTER\] Rank \d+ \(127\.0\.0\.1:\d+\) left -> "
+                          r"world size 1 \(0 student rank\(s\)\)", timeout=25):
             check("H back-to-back leaves: empty class is reported", False)
             return
         check("H back-to-back leaves: empty class is reported", True)
@@ -643,8 +645,9 @@ def scenario_join_during_run(tmp):
         c.menu("\n\n\n\n")
         check("L join during run: the latecomer joins after the run",
               c.wait_log(r"\[JOIN\] .* -> Rank 2 ", timeout=90))
-        check("L join during run: teacher re-welcomes the class",
-              c.wait_log(r"\[ROSTER\] Rank 1 re-welcomed", timeout=30))
+        check("L join during run: teacher announces the join",
+              c.wait_log(r"\[ROSTER\] Rank \d+ \([^)]*\) joined -> world size "
+                         r"3", timeout=30))
         c.menu("3\n16\n2\n1\n")             # world size 3 -> 1+2+3 = 6
         check("L join during run: next RUN includes the latecomer",
               c.wait_log(r"Running\.\.\.  \(World Size 3\)", timeout=40)
@@ -682,8 +685,8 @@ def scenario_kick_idle(tmp):
         check("M kick idle: the class continues with the rest",
               c.wait_log(r"\[KICK\] Rank 2 removed.*World size is now 2",
                          timeout=20)
-              and c.wait_log(r"\[ROSTER\] Rank \d+ left  ->  World Size 2",
-                             timeout=20))
+              and c.wait_log(r"\[ROSTER\] Rank \d+ \([^)]*\) left -> "
+                             r"world size 2", timeout=20))
         c.menu("3\n16\n2\n1\n")
         check("M kick idle: next RUN uses World Size 2 (1+2=3)",
               c.wait_log(r"Running\.\.\.  \(World Size 2\)", timeout=30)
@@ -958,6 +961,53 @@ def scenario_wrong_teacher_address(tmp):
         srv.close()
 
 
+# ---------------------------------------------------------------------------
+# U. rank numbers vs student identity (the question this test suite answers)
+def scenario_rank_identity(tmp):
+    """Ranks are POSITIONS (0..N-1), not student IDs: when somebody leaves the
+    numbers are compacted so the world stays contiguous (like MPI_COMM_WORLD's
+    size), the freed number goes to the next joiner, and the class log always
+    names the machine (ip:port) so nothing is ambiguous."""
+    c = Class("U", 5, tmp)
+    try:
+        c.start_teacher()
+        for tag, rank in (("w1", 1), ("w2", 2), ("w3", 3)):
+            c.start_worker(tag)
+            c.wait_log(r"\[JOIN\] 127\.0\.0\.1:\d+ -> Rank %d " % rank,
+                       timeout=25)
+        if not c.wait_menu(1, timeout=45):
+            check("U rank identity: menu reached", False)
+            return
+        # 1) the middle student leaves -> the last one moves DOWN into the hole
+        kill(c.workers["w2"])
+        check("U rank identity: the departure is logged with its identity",
+              c.wait_log(r"\[LEAVE\] Rank 2 disconnected  "
+                         r"\[127\.0\.0\.1:\d+\]", timeout=25))
+        check("U rank identity: the cause comes first, then the renumbering",
+              c.wait_log(r"\[ROSTER\] Rank 2 \(127\.0\.0\.1:\d+\) left -> "
+                         r"world size 3", timeout=25)
+              and c.wait_log(r"\[ROSTER\]     Rank 3 -> Rank 2  "
+                             r"\(127\.0\.0\.1:\d+\)", timeout=25))
+        # 2) a newcomer takes the freed number (the slot is refilled)
+        c.start_worker("w4")
+        check("U rank identity: the freed rank goes to the next joiner",
+              c.wait_log(r"\[JOIN\] 127\.0\.0\.1:\d+ -> Rank 3 ",
+                         timeout=25))
+        # 3) and the class still runs with a contiguous world of 4
+        c.menu("3\n16\n2\n1\n")
+        check("U rank identity: a RUN uses the contiguous world (1+2+3+4=10)",
+              c.wait_log(r"Running\.\.\.  \(World Size 4\)", timeout=30)
+              and c.wait_log(r"Collective complete", timeout=30)
+              and "final = 10" in c.log())
+        # 4) students are told why their number changed
+        moved = c.log("w3")
+        check("U rank identity: the student is told what changed",
+              "(you were Rank 3)" in moved
+              and "a student left and the ranks were renumbered" in moved)
+    finally:
+        c.close()
+
+
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     tmp = tempfile.mkdtemp(prefix="minimpi_robustness_")
@@ -984,6 +1034,7 @@ def main():
     scenario_interrupt_quit_run(tmp)
     scenario_busy_port(tmp)
     scenario_wrong_teacher_address(tmp)
+    scenario_rank_identity(tmp)
     print("\nRobustness tests: %d passed, %d failed" % (len(_passed),
                                                         len(_failed)))
     if _failed:

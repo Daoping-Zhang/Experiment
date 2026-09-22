@@ -198,7 +198,21 @@ world size is rank 0 + the workers that are here now, and it may differ.
     worker used to die with a JSONDecodeError traceback, and now reports
     `[JOIN REFUSED] the service at ... is not a MiniMPI teacher ... check the
     teacher's IP:port`, retries, and exits 3.
-* New automated suite `tests/test_robustness.py`: 84 checks over real
+* Roster logging reworked after a user report that it LOOKED like a bug:
+  the reason was printed AFTER its effects ("Rank 1 re-welcomed ... Rank 2
+  left"), and the lines named only rank numbers. It is now cause-first, names
+  WHO by ip:port (the identity that never changes), and lists only the ranks
+  whose NUMBER changed:
+  [LEAVE] Rank 2 disconnected [ip:port]
+  [ROSTER] Rank 2 (ip:port) left -> world size 3 (2 student rank(s))
+  [ROSTER]     Rank 3 -> Rank 2  (ip:port)
+  Students now get the same explanation ("world size is now 3, you are Rank 2
+  (you were Rank 3)" + why). READMEs explain WHY ranks are compacted (the
+  world must stay contiguous 0..N-1 for Ring/RD/Tree/barrier, exactly like
+  MPI_COMM_WORLD's size) and that the freed number goes to the next joiner.
+  New scenario U asserts: identity in the log, cause before effect, freed rank
+  reused by the next joiner, contiguous world runs (1+2+3+4), student told.
+* New automated suite `tests/test_robustness.py`: 89 checks over real
   teacher/worker processes — leave while idle, late join, leave during a run
   (no hang, menu still usable, next RUN correct), watchdog, teacher
   disappears, and a BURST join (three students join at once; every rank must
@@ -255,7 +269,7 @@ test_version_guard (join-time version refusal), test_robustness (join / leave /
 abort / watchdog / frozen peer / teacher-gone / burst-join / benchmark leave /
 join-during-run / kick idle / kick stuck RUN / rank error / menu Ctrl-C /
 unreachable teacher / bad bench env / quit stuck RUN / busy port / wrong
-teacher address, real processes), verify.py.
+teacher address / rank identity, real processes), verify.py.
 
 ## Remaining Issues
 
