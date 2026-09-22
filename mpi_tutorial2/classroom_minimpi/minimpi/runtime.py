@@ -165,7 +165,16 @@ class MiniRuntime:
                            "port": self.transport.port,
                            "version": _worker_version(),
                            "protocol": P.PROTOCOL_VERSION})
-        welcome = self.control.recv()
+        try:
+            welcome = self.control.recv()
+        except ValueError as e:
+            # Some other service answered (wrong IP/port is the classic
+            # classroom mistake): tell the student, never show them a JSON
+            # decode traceback.
+            raise JoinRefused(
+                "the service at %s is not a MiniMPI teacher (or answered "
+                "garbage: %s) — check the teacher's IP:port" % (server, e),
+                "badreply")
         if welcome is None:
             raise RuntimeError("teacher closed the control connection")
         if welcome.get("t") == P.C_ERROR:

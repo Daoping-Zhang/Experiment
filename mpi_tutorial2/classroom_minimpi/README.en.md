@@ -424,6 +424,8 @@ roster, removes the rank that stopped answering, and the rest carry on.
 | A student starts the worker with a wrong server address (class not running) | `[JOIN REFUSED] cannot reach the teacher ...` with retries, **never a traceback**; gives up cleanly (exit 3) | No |
 | A typo in an env var (`MINIMPI_BENCH_SIZES=abc,7`) | `[warn] ... ignored abc, 7` and the teacher still starts | No |
 | Ctrl-C at the MENU | Leaves the session and releases every worker (never swallowed) | No |
+| **The teacher's port is busy** (a second teacher, or Docker holding 9000) | A clear error with a usable alternative (`python3 teacher.py --size 4 --port 9001`) and exit code 1 — never a traceback | No |
+| **A student types the wrong IP:port** (reaches another service) | `[JOIN REFUSED] the service at ... is not a MiniMPI teacher ... check the teacher's IP:port`, retried and then exit 3 — never a JSON traceback | No |
 | Giving up on a stuck RUN | Ctrl-C -> the roster prompt accepts `q` -> that RUN is aborted, nobody is dropped | No |
 
 #### Known transport anomaly (honest disclosure)
@@ -453,9 +455,13 @@ is refused explicitly instead of quietly rewriting the live world. Test F
 must agree on the world size.
 
 ```bash
-python3 tests/test_robustness.py        # join/leave/abort/watchdog acceptance
+python3 tests/test_robustness.py        # join/leave/abort/watchdog/kick (84 checks)
 MINIMPI_RUN_TIMEOUT=120 python3 teacher.py --size 8   # trip the watchdog sooner
 ```
+
+> Port tip: on macOS **Docker often holds port 9000**. Check with
+> `lsof -nP -iTCP:9000`, and if it is taken use another port (e.g. `--port
+> 9001`) — the teacher now prints the exact command to use.
 
 ## 4. Classroom demo main line
 

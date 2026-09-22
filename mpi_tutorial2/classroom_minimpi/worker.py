@@ -71,7 +71,7 @@ def join_world(MPI, server, attempts=None, delay=None):
             if i > 1:
                 print("\n[JOIN] reconnected on attempt %d." % i)
             return
-        except (JoinRefused, OSError) as e:
+        except (JoinRefused, OSError, ValueError) as e:
             if isinstance(e, OSError):
                 # the teacher is not listening (yet), or the network dropped:
                 # a student must see words, not a traceback

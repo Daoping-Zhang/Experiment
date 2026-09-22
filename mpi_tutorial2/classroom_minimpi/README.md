@@ -353,6 +353,8 @@ netstat 状态都查过：worker 侧连接看起来仍然 ESTABLISHED 且没有 
 | 学生用错误的 server 地址启动（老师没开/已下课） | 打印 `[JOIN REFUSED] cannot reach the teacher ...` 并重试，**不再抛 traceback**；重试用尽后干净退出（exit 3） | 不会 |
 | 环境变量写错（`MINIMPI_BENCH_SIZES=abc,7`） | 打印 `[warn] ... ignored abc, 7` 并跳过，teacher **不会因此崩掉** | 不会 |
 | 老师端 Ctrl-C（在菜单里） | 正常退出并释放所有 worker（不会被吞掉） | 不会 |
+| **老师端口被占用**（开了第二个 teacher / Docker 占了 9000） | 明确报错并建议换成可用端口（`python3 teacher.py --size 4 --port 9001`），退出码 1，**不是 traceback** | 不会 |
+| **学生填错 IP:端口**（连上了别的服务） | `[JOIN REFUSED] the service at ... is not a MiniMPI teacher ... check the teacher's IP:port`，重试后干净退出（exit 3），**不是 JSON traceback** | 不会 |
 | 课堂卡住时想放弃这个 RUN | Ctrl-C → 名单提示里输 `q` → abort 该 RUN 回菜单，**不剔除任何人** | 不会 |
 
 **并发正确性（踩过的坑，已修）**：加入/退出/RUN 分别由不同线程处理，所以控制面发送被
@@ -363,9 +365,13 @@ netstat 状态都查过：worker 侧连接看起来仍然 ESTABLISHED 且没有 
 测试 F（burst join）专门盯这个：三个同学同时加入时，每个人的 world size 必须一致。
 
 ```bash
-python3 tests/test_robustness.py        # 加入/退出/中断/看门狗 鲁棒性验收
+python3 tests/test_robustness.py        # 加入/退出/中断/看门狗/踢人 鲁棒性验收（84 项）
 MINIMPI_RUN_TIMEOUT=120 python3 teacher.py --size 8   # 想更快触发看门狗
 ```
+
+> 端口提示：macOS 上 **Docker 常占用 9000**。启动前可先查一下：
+> `lsof -nP -iTCP:9000`；若被占用就换端口（例如 `--port 9001`），
+> teacher 现在会直接把可用命令打出来告诉你。
 
 ## 4. 课堂演示主线
 

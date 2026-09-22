@@ -190,7 +190,15 @@ world size is rank 0 + the workers that are here now, and it may differ.
   can rejoin). All-thread dumps, socket-close tracing and netstat snapshots did
   not expose a close path, so scenario O asserts the ROBUST property (the class
   stays usable, no watchdog wait) rather than one specific surviving rank.
-* New automated suite `tests/test_robustness.py`: 81 checks over real
+* Classroom-mistake hardening (both found by an actual end-to-end launch):
+  * starting the teacher on a busy port (a second teacher, or Docker holding
+    9000 on macOS) printed a raw OSError traceback; it now explains the
+    problem, prints the exact command with a free port and exits 1;
+  * a student typing the wrong IP:port can reach some other service; the
+    worker used to die with a JSONDecodeError traceback, and now reports
+    `[JOIN REFUSED] the service at ... is not a MiniMPI teacher ... check the
+    teacher's IP:port`, retries, and exits 3.
+* New automated suite `tests/test_robustness.py`: 84 checks over real
   teacher/worker processes — leave while idle, late join, leave during a run
   (no hang, menu still usable, next RUN correct), watchdog, teacher
   disappears, and a BURST join (three students join at once; every rank must
@@ -246,8 +254,8 @@ synchronization window, benchmark one-input/no-zero-data-size/median-summary),
 test_version_guard (join-time version refusal), test_robustness (join / leave /
 abort / watchdog / frozen peer / teacher-gone / burst-join / benchmark leave /
 join-during-run / kick idle / kick stuck RUN / rank error / menu Ctrl-C /
-unreachable teacher / bad bench env / quit stuck RUN, real processes),
-verify.py.
+unreachable teacher / bad bench env / quit stuck RUN / busy port / wrong
+teacher address, real processes), verify.py.
 
 ## Remaining Issues
 

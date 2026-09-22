@@ -246,7 +246,22 @@ class Coordinator:
 
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server.bind((host, port))
+        try:
+            self.server.bind((host, port))
+        except OSError as e:
+            # Do not die with a traceback in front of the class: say what is
+            # wrong and what to do (another program - Docker, a second teacher
+            # - already holds this port).
+            hint = ""
+            if e.errno in (48, 98):          # EADDRINUSE (macOS / Linux)
+                hint = ("\n[ERROR] port %d is already in use on this machine."
+                        "\n[ERROR] Another program (or a second teacher) is "
+                        "holding it. Start with a different port, e.g.:\n"
+                        "        python3 teacher.py --size 4 --port %d"
+                        % (port, port + 1))
+            self.server.close()
+            raise SystemExit("[ERROR] cannot listen on %s:%d (%s)%s"
+                             % (host, port, e, hint))
         self.server.listen(64)
         self.port = self.server.getsockname()[1]
         threading.Thread(target=self._accept_loop, daemon=True).start()

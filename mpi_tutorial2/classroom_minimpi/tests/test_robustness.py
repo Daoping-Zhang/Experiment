@@ -21,6 +21,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -901,6 +902,62 @@ def scenario_interrupt_quit_run(tmp):
         c.close()
 
 
+# ---------------------------------------------------------------------------
+# T. classroom mistakes: a busy port and a wrong teacher address
+def scenario_busy_port(tmp):
+    """Starting the teacher twice (or on a port another program holds) must say
+    what is wrong instead of dying with a traceback in front of the class."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        p = subprocess.run([PY, os.path.join(ROOT, "teacher.py"),
+                            "--size", "4", "--port", str(port)],
+                           capture_output=True, text=True, timeout=40, input="")
+        out = p.stdout + p.stderr
+        check("T busy port: the teacher explains, no traceback",
+              "Traceback" not in out and "already in use" in out
+              and p.returncode == 1, "rc=%s" % p.returncode)
+        check("T busy port: a usable alternative is suggested",
+              ("--port %d" % (port + 1)) in out)
+    finally:
+        srv.close()
+
+
+def scenario_wrong_teacher_address(tmp):
+    """A student typing the wrong IP:port may reach some other service; they
+    must be told, not shown a JSON decode traceback."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(5)
+    port = srv.getsockname()[1]
+
+    def serve():
+        for _ in range(6):
+            try:
+                c, _peer = srv.accept()
+                c.sendall(b"hello, some other program\n")
+                c.close()
+            except OSError:
+                return
+    threading.Thread(target=serve, daemon=True).start()
+    env = dict(os.environ, PYTHONUNBUFFERED="1",
+               MINIMPI_JOIN_ATTEMPTS="2", MINIMPI_JOIN_RETRY_S="0.1")
+    try:
+        p = subprocess.run([PY, os.path.join(ROOT, "worker.py"),
+                            "--server", "127.0.0.1:%d" % port],
+                           capture_output=True, text=True, timeout=40, env=env)
+        out = p.stdout + p.stderr
+        check("T wrong address: the student is told, no traceback",
+              "Traceback" not in out and "not a MiniMPI teacher" in out
+              and p.returncode == 3, "rc=%s" % p.returncode)
+    finally:
+        srv.close()
+
+
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     tmp = tempfile.mkdtemp(prefix="minimpi_robustness_")
@@ -925,6 +982,8 @@ def main():
     scenario_worker_no_teacher(tmp)
     scenario_bad_bench_env(tmp)
     scenario_interrupt_quit_run(tmp)
+    scenario_busy_port(tmp)
+    scenario_wrong_teacher_address(tmp)
     print("\nRobustness tests: %d passed, %d failed" % (len(_passed),
                                                         len(_failed)))
     if _failed:
