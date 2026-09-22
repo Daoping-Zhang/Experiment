@@ -109,6 +109,45 @@ wait for the teacher's next RUN
 In the Performance Benchmark you type your integer **once**; all cases then
 run automatically, and the results table is shown on **every rank**.
 
+### What is my rank, and why does it change?
+
+- **A rank is your position in THIS collective** (0..N-1), not your student ID.
+  Your identity is your machine (the teacher's roster shows its `ip:port`,
+  which never changes).
+- When somebody joins / leaves / is kicked, the class **creates a new
+  communicator** — the equivalent of real MPI's `MPI_Comm_split`: a fresh one
+  for the students who are present, with ranks renumbered 0..N-1. Your number
+  may therefore change, and your terminal says so:
+  ```text
+  [ROSTER] world size is now 3, you are Rank 2  (you were Rank 3)
+  [ROSTER] a student left and the ranks were renumbered
+  ```
+- **Why it has to work that way**: an MPI collective needs **every** member.
+  "Some people missing" is not "run with fewer ranks" — it waits forever, and
+  in real MPI a dead process normally fails the whole job. A classroom cannot
+  stop because one laptop closed, so we rebuild the communicator and carry on.
+  This is the one deliberate deviation from standard MPI in the classroom
+  version.
+- Before each RUN the teacher prints `Running...  (World Size n)`: that n is the
+  number of participants this time, and it matches the `Rank: r / n` on your
+  terminal.
+
+### What if I get disconnected? (what the terminal prints)
+
+| You see | Meaning | What you do |
+|---|---|---|
+| `[ROSTER] ... (you were Rank 3)` | Somebody joined/left, your number changed | **Nothing** — wait for the next RUN |
+| `[ABORT] this RUN ended early: ...` | This RUN is void (someone left / teacher stopped it) | **Nothing** — wait for the next RUN |
+| `[KICKED] the teacher removed this rank` | The teacher removed you (e.g. your machine froze) | Double-click the launcher again to rejoin (as a new student, possibly a new rank) |
+| `[CONTROL LOST] ...` | Your link to the teacher broke (network blip / teacher restarted) | Double-click the launcher again |
+| `[JOIN REFUSED] ... run is in progress` | A RUN is in flight, you cannot join yet | **Nothing** — the worker retries every 3 s and joins automatically when the RUN ends |
+| `[JOIN REFUSED] ... cannot reach the teacher` | The teacher is not running, or the IP/port is wrong | Check the teacher's `IP:port` and launch again |
+| Stuck at `Waiting for Rank 0...` | Same as above | Same as above |
+
+> Do **not** restart your worker just because your rank changed — that is normal
+> classroom behaviour. Only the rows marked "double-click the launcher again"
+> need action from you.
+
 ## 5. Version consistency (important)
 
 The teacher and every worker must be the same version, otherwise the join is

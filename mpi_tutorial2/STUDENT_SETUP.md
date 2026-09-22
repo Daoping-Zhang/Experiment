@@ -102,6 +102,38 @@ Collective Complete → Result
 Performance Benchmark 时**只输入一次**，之后自动跑完；结果表会显示在**每个 rank**
 的终端上。
 
+### 我的 rank 是什么？为什么会变？
+
+- **rank 是你这一次 collective 里的位置**（0..N-1），不是你的学号；你的"身份"是你这台
+  机器（老师名单里显示 `ip:port`，那个不会变）。
+- 有人加入 / 退出 / 被踢时，课堂会**重建一个 communicator**——相当于真实 MPI 里的
+  `MPI_Comm_split`：只为在场的人建一个，rank 重新排成 0..N-1。所以你的号可能变化，
+  终端会明确告诉你：
+  ```text
+  [ROSTER] world size is now 3, you are Rank 2  (you were Rank 3)
+  [ROSTER] a student left and the ranks were renumbered
+  ```
+- **为什么必须这样**：MPI 的 collective **必须全体参与**，"人不齐"不是少几个人跑，而是
+  永远等下去；真实 MPI 里进程死了通常是整个作业失败。课堂不能因为一个人合盖就停课，
+  所以我们选择"重建 communicator 继续"——这是课堂版唯一有意偏离标准 MPI 的地方。
+- 每次 RUN 开始前老师会打印 `Running...  (World Size n)`：那个 n 就是这一次的参与人数，
+  和你终端上的 `Rank: r / n` 一致。
+
+### 掉线了怎么办？（终端会打印什么）
+
+| 你会看到 | 含义 | 你要做什么 |
+|---|---|---|
+| `[ROSTER] ... (you were Rank 3)` | 有人加入/退出，你的号变了 | **什么都不用做**，继续等下一次 RUN |
+| `[ABORT] this RUN ended early: ...` | 这一轮作废（有人掉线 / 老师中止） | **什么都不用做**，等老师下一次 RUN |
+| `[KICKED] the teacher removed this rank` | 老师把你移出课堂（例如你的机器卡住了） | 重新双击启动脚本即可再加入（作为新同学，rank 可能不同） |
+| `[CONTROL LOST] ...` | 你和老师的连接断了（网络抖动 / 老师重启） | 重新双击启动脚本 |
+| `[JOIN REFUSED] ... run is in progress` | 老师正在跑一轮，你暂时进不来 | **什么都不用做**：worker 每 3 秒自动重试，RUN 一结束就自动加入 |
+| `[JOIN REFUSED] ... cannot reach the teacher` | 老师还没启动，或 IP/端口填错 | 核对老师公布的 `IP:端口` 后重新双击启动脚本 |
+| 一直停在 `Waiting for Rank 0...` | 同上 | 同上 |
+
+> 注意：**不要因为自己 rank 变了就重启 worker**。rank 变化是正常的课堂行为；
+> 只有上面标了"重新双击启动脚本"的几种情况才需要你动手。
+
 ## 5. 版本一致性（务必注意）
 
 teacher 与 worker 必须同版本，否则 join 会被拒绝：
