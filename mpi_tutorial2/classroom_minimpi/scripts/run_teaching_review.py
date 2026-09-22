@@ -207,9 +207,18 @@ world size is rank 0 + the workers that are here now, and it may differ.
   [ROSTER] Rank 2 (ip:port) left -> world size 3 (2 student rank(s))
   [ROSTER]     Rank 3 -> Rank 2  (ip:port)
   Students now get the same explanation ("world size is now 3, you are Rank 2
-  (you were Rank 3)" + why). READMEs explain WHY ranks are compacted (the
-  world must stay contiguous 0..N-1 for Ring/RD/Tree/barrier, exactly like
-  MPI_COMM_WORLD's size) and that the freed number goes to the next joiner.
+  (you were Rank 3)" + why).
+  MPI framing corrected after an inaccurate claim in the first draft: in real
+  MPI, MPI_COMM_WORLD is FIXED at MPI_Init and a collective needs EVERY member -
+  a missing rank is a hang / undefined behaviour (a dead process normally fails
+  the whole job; only MPI-ULFM offers revoke/shrink). The standard way to
+  involve a subset is a NEW communicator (MPI_Comm_split /
+  MPI_Comm_create_group) with ranks renumbered 0..M-1. MiniMPI's roster update
+  is therefore documented as "a new communicator generation over the students
+  who are present" (the effect of MPI_Comm_split), not as "COMM_WORLD's size is
+  the number of participants". The one deliberate deviation (a student may drop
+  out or arrive mid-lesson, so the class shrinks/grows instead of failing) is
+  stated explicitly, with the reason: a classroom must not wedge.
   New scenario U asserts: identity in the log, cause before effect, freed rank
   reused by the next joiner, contiguous world runs (1+2+3+4), student told.
 * New automated suite `tests/test_robustness.py`: 89 checks over real

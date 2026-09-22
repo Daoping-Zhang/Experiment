@@ -348,14 +348,24 @@ Key points:
 - All of this is covered by an automated test:
   `python3 tests/test_robustness.py` (**54 checks, real processes**).
 
-#### Rank number vs student identity (why ranks change when somebody leaves)
+#### Rank number vs student identity (why ranks are renumbered, and what real MPI does)
 
-A **rank is a position in this collective, not a student ID**. In MPI the size of
-`MPI_COMM_WORLD` is the number of participants and ranks are 0..N-1, and every
-collective here relies on exactly that (Ring's `(r+1)%P`, RD's `r^k`, Tree's
-`r+2^k`, the barrier gathering from `range(1, size)`). When somebody leaves the
-world therefore has to become contiguous 0..N-1 again — later ranks move down —
-instead of keeping a hole:
+First, the real MPI rules — the intuition here is easy to get backwards:
+
+- `MPI_COMM_WORLD` fixes size/rank at `MPI_Init`: size = the number of started
+  processes, rank = `0..size-1`. **It never shrinks while the program runs.**
+- A collective on one communicator requires **every** member. A missing rank is
+  not "run with fewer": it is undefined behaviour / a hang, and if the process
+  died, standard MPI normally **fails the whole job** (only extensions such as
+  MPI-ULFM offer revoke / shrink).
+- The correct MPI way to involve "only some of them" is to **create a new
+  communicator**: `MPI_Comm_split` / `MPI_Comm_create_group`, where ranks are
+  renumbered `0..M-1`; COMM_WORLD itself is untouched.
+
+What MiniMPI does in the classroom is exactly the latter (a simplified form):
+**after every membership change (join / leave / kick) it behaves as if a NEW
+communicator (a new generation) was created**, the present students are
+renumbered `0..M-1`, and the new peer table is sent to everybody. So
 
 ```
 [LEAVE] Rank 2 disconnected  [192.168.1.46:51239]  (ConnectionError: ...)
@@ -363,16 +373,30 @@ instead of keeping a hole:
 [ROSTER]     Rank 3 -> Rank 2  (192.168.1.47:51241)     <- who is what now
 ```
 
-- **Identity** is the `ip:port` (data-plane endpoint), which never changes: the
+is not "COMM_WORLD shrinking" but the effect of `MPI_Comm_split`: this RUN uses
+the new communicator's size and ranks (`Running...  (World Size n)`).
+
+Two classroom conclusions:
+
+- **"If not everybody is there, you cannot communicate" — completely correct.**
+  So we never run with people missing: we build a NEW communicator over the
+  students who ARE there. That is also why every membership change must re-send
+  `C_WELCOME` (the new communicator's rank/size/peers — otherwise the
+  data-plane sockets cached per rank would send to the wrong peer).
+- **"Ranks should be stable" holds only while no process ever exits.** In a
+  classroom somebody closes a laptop; real MPI calls that a failed job, we turn
+  it into "shrink + new communicator", and the price is that numbers change.
+  This is our **one deliberate deviation** from standard MPI, and only so that
+  one student dropping out cannot wedge the class.
+
+Two more notes:
+
+- **Identity** is the `ip:port` (data-plane endpoint); it never changes, and the
   JOIN / LEAVE / renumbering lines all print it, so "who left?" is never
-  ambiguous even when numbers move.
-- **Is the freed number refilled?** Yes — the next joiner gets exactly the number
-  that was vacated (after compaction the highest hole is the free one).
-- **Students are told too**: `[ROSTER] world size is now 3, you are Rank 2 (you
-  were Rank 3)` + `a student left and the ranks were renumbered`.
-- Stable numbers with a hole would mean sparse ranks: Ring/RD/Tree/Barrier would
-  all need rewriting and it would no longer match real `COMM_WORLD` semantics —
-  deliberately out of scope for this tutorial.
+  ambiguous. The teacher tool (menu 10) shows rank and endpoint together.
+- **Somebody who comes back** joins the next generation as a NEW process (with
+  possibly a new rank). In real MPI a process cannot join COMM_WORLD later —
+  another place where a classroom has to deviate.
 
 #### Teacher-side roster and kick (menu 10)
 

@@ -271,13 +271,22 @@ worker : [VERSION MISMATCH] ... Please update this student copy (git pull /
   rank 会复用到别人的连接——这是最容易出错的地方，`PeerTransport.reset_peers()` 专门处理它。
 - 这些场景都有自动化验收：`python3 tests/test_robustness.py`（**54 项检查，全部真实进程**）。
 
-#### rank 数字 vs 学生身份（为什么有人退出后 rank 会变）
+#### rank 数字 vs 学生身份（为什么要"重排"，这和真实 MPI 是什么关系）
 
-**rank 不是学生编号，而是"这次 collective 里的位置"**。MPI 里 `MPI_COMM_WORLD` 的
-size 就是参与者个数、rank 是 0..N-1；我们的 collective（Ring 的 `(r+1)%P`、RD 的
-`r^k`、Tree 的 `r+2^k`、Barrier 从 `range(1,size)` 收 token）全都依赖这个前提。
-所以有人退出时，必须让世界重新变成**连续的 0..N-1**——也就是把后面的人往前挪
-（"压缩"），而不是留一个洞：
+先把真实 MPI 的规则说准（这里的直觉很容易搞反）：
+
+- `MPI_COMM_WORLD` 在 `MPI_Init` 时就把 size/rank **定死**了：size = 启动的进程数，
+  rank = `0..size-1`，**运行中不会变小**。
+- **同一个 communicator 上的 collective 必须全体参与**。少一个人不是"缩容运行"，而是
+  永远等下去（未定义行为 / 挂死）；如果那个进程死了，标准 MPI 通常让**整个作业失败**
+  （只有 MPI-ULFM 这类扩展才提供 revoke / shrink）。
+- 真实 MPI 里"只有一部分人参与"的正确做法是**新建一个 communicator**：
+  `MPI_Comm_split` / `MPI_Comm_create_group`，在新 communicator 里 rank 重新编号为
+  `0..M-1`，原来的 COMM_WORLD 一动不动。
+
+MiniMPI 课堂做的正是后者（简化版）：**每次成员变化（有人加入 / 退出 / 被踢）之后，
+就当作新建了一个 communicator（我们记作一次 generation）**，在场同学在其中重新编号
+`0..M-1`，并把新的 peers 表发给每个人。所以日志里的
 
 ```
 [LEAVE] Rank 2 disconnected  [192.168.1.46:51239]  (ConnectionError: ...)
@@ -285,14 +294,24 @@ size 就是参与者个数、rank 是 0..N-1；我们的 collective（Ring 的 `
 [ROSTER]     Rank 3 -> Rank 2  (192.168.1.47:51241)      ← 谁变成了几号，看得见
 ```
 
-- **身份用什么认？** 用 `ip:port`（数据面地址）——它永远不变。日志里 JOIN/LEAVE/重排
-  都会打印它，所以"到底是谁走了"不会因为 rank 变化而含糊。
-- **空出来的号会补上吗？** 会：下一个加入的同学拿到的就是刚空出来的那个号
-  （因为压缩后最大的空缺号就是空位）。
-- **学生端也会有解释**：`[ROSTER] world size is now 3, you are Rank 2 (you were Rank 3)`
-  + `a student left and the ranks were renumbered`，学生知道是别人退出导致自己换号。
-- 想彻底不换号？那就得让世界留洞（sparse ranks），Ring/RD/Tree/Barrier 全部要重写，
-  而且和真实 MPI 的 `COMM_WORLD` 语义不再一致——这是本教程**故意不做**的事。
+不是"COMM_WORLD 缩容"，而是 **`MPI_Comm_split` 的效果**：这一次 RUN 用这个新
+communicator 的 size 与 rank（菜单/日志里的 `Running...  (World Size n)`）。
+
+于是两个课堂结论：
+
+- **"人不齐就不能通信"——完全正确**。所以我们不是让人不齐，而是**只为在场的同学建一个
+  新 communicator** 再跑；这也是为什么每次成员变化都必须重发 `C_WELCOME`（= 新 communicator
+  的 rank/size/peers 表，否则数据面按旧号码缓存的连接会发错人）。
+- **"rank 应该固定"成立的前提是"进程从不退出"**。课堂必然有人合盖/掉线，真实 MPI 在这种
+  情况下是"作业失败"，我们把它换成了"自动 shrink + 新 communicator"，代价就是号码会变。
+  这是我们**唯一有意偏离**真实 MPI 的地方，目的只有一个：课堂不能因为一个同学掉线就卡死。
+
+补充两点：
+
+- **身份用什么认？** `ip:port`（数据面地址），它永远不变；JOIN/LEAVE/重排日志都带它，
+  "到底是谁走了"不会因为 rank 变化而含糊。老师工具（菜单 10）里也同时显示 rank 与它。
+- **掉线的人回来了怎么办？** 他作为**新进程**加入下一次 generation（rank 可能是新号码）。
+  真实 MPI 里进程是不能中途加入 COMM_WORLD 的——这也是课堂场景必须偏离标准的地方。
 
 #### 老师端动态管理：名单 + 踢人（菜单 10）
 
